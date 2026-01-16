@@ -188,7 +188,10 @@
       if (reduceMotion) form = 1;
 
       // if we fully formed once, we can keep it stable
-      if (form >= 0.98) doneOnce = true;
+      // Add slight delay before marking as "done" to show stable state
+      if (form >= 0.98 && elapsed >= (driftT + settleT + 0.3)) {
+        doneOnce = true;
+      }
 
       // behind-word glow as it forms
       if (form > 0.06) {
@@ -274,7 +277,12 @@
       if (!visible) return;
       visible = false;
       root.classList.remove("is-visible");
-      cancelAnimationFrame(raf);
+      // Delay display removal to allow fade-out transition
+      setTimeout(() => {
+        if (!visible) {
+          cancelAnimationFrame(raf);
+        }
+      }, 220);
     }
 
     function destroy() {

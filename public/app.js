@@ -591,6 +591,43 @@ function getParticleLoader() {
     return particleLoader;
 }
 
+// Minimum display time for loader (900ms) to ensure visibility
+const LOADER_MIN_MS = 900;
+const LOADER_FADE_MS = 220;
+
+// Helper function to show loader with minimum display time
+function showLoaderWithMinDuration(loader) {
+    if (!loader) return null;
+    const t0 = performance.now();
+    loader.show();
+    
+    // Return function to hide with minimum delay
+    return function hideLoaderMinDelay() {
+        if (!loader) return;
+        const elapsed = performance.now() - t0;
+        const wait = Math.max(0, LOADER_MIN_MS - elapsed);
+        setTimeout(() => {
+            if (loader && typeof loader.hide === 'function') {
+                loader.hide();
+            }
+        }, wait);
+    };
+}
+
+// Debug helper to manually show loader for demo
+if (typeof window !== 'undefined') {
+    window.huddleDemoLoader = function() {
+        const loader = window.HuddleParticleLoader?.mount?.();
+        if (loader) {
+            loader.show();
+            setTimeout(() => loader.hide(), 3000);
+            console.log('Loader shown for 3 seconds. Animation should be visible!');
+        } else {
+            console.error('HuddleParticleLoader not available');
+        }
+    };
+}
+
 // Initialize routes (/host, /viewer, /mic)
 async function initializeRoute() {
     if (!routeInfo) return;
@@ -1182,9 +1219,9 @@ function connectAndCreate() {
     
     // Create new connection or use existing
     if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-        // Show particle loader before connecting
+        // Show particle loader before connecting with minimum display time
         const loader = getParticleLoader();
-        if (loader) loader.show();
+        const hideLoaderMinDelay = showLoaderWithMinDuration(loader);
         
         // Create new WebSocket connection
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1199,8 +1236,8 @@ function connectAndCreate() {
             reconnectAttempts = 0;
             updateStatusBars();
             
-            // Hide loader on successful connection
-            if (loader) loader.hide();
+            // Hide loader with minimum delay
+            hideLoaderMinDelay();
             
             // Send create_room message once connected
             const passcode = roomPasscodeInput?.value?.trim() || null;
@@ -1215,6 +1252,10 @@ function connectAndCreate() {
         ws.onmessage = (event) => {
             try {
                 const message = JSON.parse(event.data);
+                // Hide loader on first meaningful payload
+                if (message && (message.type === 'room_created' || message.type === 'viewer_state' || message.type === 'insights_update' || message.type === 'room_state')) {
+                    hideLoaderMinDelay();
+                }
                 handleMessage(message);
             } catch (error) {
                 console.error('Failed to parse WebSocket message:', error);
@@ -1224,7 +1265,7 @@ function connectAndCreate() {
         
         ws.onerror = (error) => {
             console.error('WebSocket error:', error);
-            if (loader) loader.hide();
+            hideLoaderMinDelay();
             showError('Connection error. Please refresh the page.');
         };
         
@@ -1232,7 +1273,7 @@ function connectAndCreate() {
             console.log('WebSocket closed');
             wsConnected = false;
             updateStatusBars();
-            if (loader) loader.hide();
+            hideLoaderMinDelay();
             
             if (currentRoom && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                 const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
@@ -1251,12 +1292,13 @@ function connectAndCreate() {
         };
     } else if (ws.readyState === WebSocket.CONNECTING) {
         // Currently connecting, add handler to send message when open
+        const loader = getParticleLoader();
+        const hideLoaderMinDelay = showLoaderWithMinDuration(loader);
         const originalOnOpen = ws.onopen;
         ws.onopen = () => {
             if (originalOnOpen) originalOnOpen();
+            hideLoaderMinDelay();
             if (ws.readyState === WebSocket.OPEN) {
-                const loader = getParticleLoader();
-                if (loader) loader.hide();
                 const passcode = roomPasscodeInput?.value?.trim() || null;
                 ws.send(JSON.stringify({
                     type: 'create_room',
@@ -1286,9 +1328,9 @@ function connectAndJoinAsViewer(code, passcode = null) {
     
     // Create new connection or use existing
     if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-        // Show particle loader before connecting
+        // Show particle loader before connecting with minimum display time
         const loader = getParticleLoader();
-        if (loader) loader.show();
+        const hideLoaderMinDelay = showLoaderWithMinDuration(loader);
         
         // Create new WebSocket connection
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1303,8 +1345,8 @@ function connectAndJoinAsViewer(code, passcode = null) {
             reconnectAttempts = 0;
             updateStatusBars();
             
-            // Hide loader on successful connection
-            if (loader) loader.hide();
+            // Hide loader with minimum delay
+            hideLoaderMinDelay();
             
             // Send join message once connected
             ws.send(JSON.stringify({
@@ -1320,6 +1362,10 @@ function connectAndJoinAsViewer(code, passcode = null) {
         ws.onmessage = (event) => {
             try {
                 const message = JSON.parse(event.data);
+                // Hide loader on first meaningful payload
+                if (message && (message.type === 'viewer_state' || message.type === 'insights_update' || message.type === 'room_state' || message.type === 'joined')) {
+                    hideLoaderMinDelay();
+                }
                 handleMessage(message);
             } catch (error) {
                 console.error('Failed to parse WebSocket message:', error);
@@ -1329,7 +1375,7 @@ function connectAndJoinAsViewer(code, passcode = null) {
         
         ws.onerror = (error) => {
             console.error('WebSocket error:', error);
-            if (loader) loader.hide();
+            hideLoaderMinDelay();
             showError('Connection error. Please refresh the page.');
         };
         
@@ -1337,7 +1383,7 @@ function connectAndJoinAsViewer(code, passcode = null) {
             console.log('WebSocket closed');
             wsConnected = false;
             updateStatusBars();
-            if (loader) loader.hide();
+            hideLoaderMinDelay();
             
             if (currentRoom && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                 const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
@@ -1372,6 +1418,10 @@ function connectAndJoin(code, passcode = null) {
     
     // Create new connection or use existing
     if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        // Show particle loader before connecting with minimum display time
+        const loader = getParticleLoader();
+        const hideLoaderMinDelay = showLoaderWithMinDuration(loader);
+        
         // Create new WebSocket connection
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}`;
@@ -1384,6 +1434,9 @@ function connectAndJoin(code, passcode = null) {
             wsConnected = true;
             reconnectAttempts = 0;
             updateStatusBars();
+            
+            // Hide loader with minimum delay
+            hideLoaderMinDelay();
             
             // Send join message once connected
             ws.send(JSON.stringify({
@@ -1399,6 +1452,10 @@ function connectAndJoin(code, passcode = null) {
         ws.onmessage = (event) => {
             try {
                 const message = JSON.parse(event.data);
+                // Hide loader on first meaningful payload
+                if (message && (message.type === 'joined' || message.type === 'viewer_state' || message.type === 'insights_update' || message.type === 'room_state')) {
+                    hideLoaderMinDelay();
+                }
                 handleMessage(message);
             } catch (error) {
                 console.error('Failed to parse WebSocket message:', error);
@@ -1408,6 +1465,7 @@ function connectAndJoin(code, passcode = null) {
         
         ws.onerror = (error) => {
             console.error('WebSocket error:', error);
+            hideLoaderMinDelay();
             showError('Connection error. Please refresh the page.');
         };
         
@@ -1415,6 +1473,7 @@ function connectAndJoin(code, passcode = null) {
             console.log('WebSocket closed');
             wsConnected = false;
             updateStatusBars();
+            hideLoaderMinDelay();
             
             if (currentRoom && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                 const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
@@ -1433,9 +1492,12 @@ function connectAndJoin(code, passcode = null) {
         };
     } else if (ws.readyState === WebSocket.CONNECTING) {
         // Currently connecting, add handler to send message when open
+        const loader = getParticleLoader();
+        const hideLoaderMinDelay = showLoaderWithMinDuration(loader);
         const originalOnOpen = ws.onopen;
         ws.onopen = () => {
             if (originalOnOpen) originalOnOpen();
+            hideLoaderMinDelay();
             if (ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
                     type: 'join',
