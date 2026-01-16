@@ -32,19 +32,24 @@
   function mount(options = {}) {
     const opts = {
       imgSrc: "/assets/huddle-wordmark.png",
-      brand: "#26c281",
-      bg: "#0b1220",
-      maxParticles: 2800,
-      sampleStep: 4,
+      brand: "#007A33", // Celtics green
+      bg: "#0a0f1a", // Darker background to complement green
+      maxParticles: 8000, // Many more particles for smooth, cloud-like look
+      sampleStep: 2, // Finer sampling
       targetScale: 0.68,
-      rMin: 0.7,
-      rMax: 2.0,
-      attract: 0.050,
-      swirl: 0.100,
-      damping: 0.86,
+      rMin: 0.8, // Smaller particles for smoother look
+      rMax: 1.8, // Smaller max for less graininess
+      attract: 0.045, // Gentle attraction
+      swirl: 0.075, // Smooth swirl
+      damping: 0.90, // High damping for smooth motion
+      flockRadius: 40, // Radius for flocking behavior (bird-like groups)
+      flockCohesion: 0.008, // How much particles stick together
+      flockAlignment: 0.012, // How much particles align with neighbors
+      flockSeparation: 0.015, // How much particles avoid crowding
       jitter: 0.013,
-      driftSeconds: 0.9,
-      settleSeconds: 2.4,
+      driftSeconds: 0.8, // Slightly faster drift
+      settleSeconds: 2.8, // Smooth formation time
+      pulseSeconds: 2.5, // Pulse duration after formation
       ...options,
     };
 
@@ -61,6 +66,10 @@
     createEl("div", { class: "huddle-loader-title" }, pill).textContent = "Loading…";
     const skipBtn = createEl("button", { class: "huddle-loader-skip" }, pill);
     skipBtn.textContent = "Skip";
+    
+    // "Let's Huddle" button (shown after animation completes)
+    const letsHuddleBtn = createEl("button", { class: "huddle-loader-lets-huddle" }, root);
+    letsHuddleBtn.textContent = "Let's Huddle";
 
     // Offscreen for image sampling
     const off = document.createElement("canvas");
@@ -86,13 +95,33 @@
     }
 
     function loadImage() {
-      if (imgLoaded || img) return Promise.resolve();
+      if (imgLoaded && img && img.complete && img.naturalWidth > 0) {
+        return Promise.resolve();
+      }
+      if (img && img.complete && img.naturalWidth > 0) {
+        imgLoaded = true;
+        return Promise.resolve();
+      }
       return new Promise((resolve, reject) => {
         img = new Image();
         img.crossOrigin = "anonymous";
         img.onload = () => {
-          imgLoaded = true;
-          resolve();
+          // Double-check image is actually ready for drawing
+          if (img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+            imgLoaded = true;
+            resolve();
+          } else {
+            // Wait a bit more for image to fully decode
+            setTimeout(() => {
+              if (img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+                imgLoaded = true;
+                resolve();
+              } else {
+                console.error("Image load promise resolved but image not ready");
+                reject(new Error("Image not ready for drawing"));
+              }
+            }, 50);
+          }
         };
         img.onerror = () => {
           console.error("Failed to load wordmark image:", opts.imgSrc);
@@ -103,8 +132,14 @@
     }
 
     function makeTargets() {
-      if (!imgLoaded || !img || !img.complete) {
-        console.warn("makeTargets called but image not ready");
+      if (!imgLoaded || !img || !img.complete || img.naturalWidth === 0 || img.naturalHeight === 0) {
+        console.warn("makeTargets called but image not ready", {
+          imgLoaded,
+          hasImg: !!img,
+          complete: img?.complete,
+          naturalWidth: img?.naturalWidth,
+          naturalHeight: img?.naturalHeight
+        });
         return [];
       }
 
@@ -136,15 +171,28 @@
       const pts = [];
       const step = opts.sampleStep;
 
-      // sample pixels where alpha > threshold (logo shape)
+      // sample pixels where logo is visible
+      // Image is RGB (no alpha), so use brightness to find light logo on dark background
+      // Background is dark (#0b1220), logo is bright white/light colors
+      
       for (let y = 0; y < h; y += step) {
         for (let x = 0; x < w; x += step) {
           const i = (y * w + x) * 4;
-          const a = data[i + 3];
-          if (a > 25) {
+          const r = data[i];
+          const g = data[i + 1];
+          const b = data[i + 2];
+          
+          // Calculate luminance (perceived brightness)
+          const luminance = (r * 0.299 + g * 0.587 + b * 0.114);
+          
+          // Sample bright pixels (logo) - exclude dark background
+          // Threshold: logo text/bubble is bright (luminance > 80-255)
+          // Background is dark (luminance ~18)
+          // Higher threshold = more selective, crisper logo
+          if (luminance > 90) {
             pts.push({
-              x: x + (Math.random() - 0.5) * step * 0.6,
-              y: y + (Math.random() - 0.5) * step * 0.6
+              x: x + (Math.random() - 0.5) * step * 0.3, // Tighter placement for solid look
+              y: y + (Math.random() - 0.5) * step * 0.3
             });
           }
         }
@@ -189,10 +237,11 @@
       ctx.fillStyle = opts.bg;
       ctx.fillRect(0, 0, w, h);
 
-      // radial brand glow
+      // Celtics green radial glow - deep, rich green theme
       const g = ctx.createRadialGradient(w * 0.5, h * 0.35, 60, w * 0.5, h * 0.35, Math.max(w, h));
-      g.addColorStop(0, "rgba(38,194,129,0.12)");
-      g.addColorStop(0.55, "rgba(38,194,129,0.03)");
+      g.addColorStop(0, "rgba(0,122,51,0.18)"); // Celtics green with opacity
+      g.addColorStop(0.4, "rgba(0,122,51,0.08)");
+      g.addColorStop(0.7, "rgba(0,122,51,0.03)");
       g.addColorStop(1, "rgba(0,0,0,0)");
       ctx.fillStyle = g;
       ctx.fillRect(0, 0, w, h);
@@ -210,6 +259,7 @@
 
       const driftT = opts.driftSeconds;
       const settleT = opts.settleSeconds;
+      const pulseT = opts.pulseSeconds;
 
       let form = 0;
       if (elapsed <= driftT) form = 0;
@@ -217,55 +267,192 @@
 
       if (reduceMotion) form = 1;
 
+      // Calculate if we're in pulse phase (after formation completes)
+      const formationCompleteTime = driftT + settleT;
+      const isPulsing = elapsed > formationCompleteTime && elapsed <= formationCompleteTime + pulseT;
+      const pulseProgress = isPulsing ? (elapsed - formationCompleteTime) / pulseT : 0;
+      
+      // Pulse effect: smooth sine wave for breathing effect
+      const pulseScale = isPulsing ? 1 + Math.sin(pulseProgress * Math.PI * 4) * 0.08 : 1; // 4 pulses over duration
+      const pulseGlow = isPulsing ? 0.3 + Math.sin(pulseProgress * Math.PI * 4) * 0.2 : 0;
+
+      // Ensure form reaches 1.0 for complete formation
+      form = Math.min(1.0, form);
+
       // if we fully formed once, we can keep it stable
-      // Add slight delay before marking as "done" to show stable state
-      if (form >= 0.98 && elapsed >= (driftT + settleT + 0.3)) {
+      if (form >= 0.99 && elapsed >= formationCompleteTime) {
         doneOnce = true;
+        // Show "Let's Huddle" button after formation completes and pulse starts
+        if (letsHuddleBtn && !letsHuddleBtn.classList.contains('is-visible')) {
+          setTimeout(() => {
+            if (letsHuddleBtn) letsHuddleBtn.classList.add('is-visible');
+          }, 1000); // Show after 1 second of pulse
+        }
       }
 
-      // behind-wordmark glow as it forms
-      if (form > 0.06) {
+      // behind-wordmark glow as it forms - Celtics green glow
+      if (form > 0.06 || isPulsing) {
         ctx.save();
         ctx.globalCompositeOperation = "lighter";
-        ctx.fillStyle = "rgba(38,194,129,0.26)";
-        ctx.filter = "blur(16px)";
+        // Rich Celtics green glow that intensifies as logo forms, pulses when complete
+        let glowIntensity = 0.15 + form * 0.25;
+        if (isPulsing) {
+          glowIntensity += pulseGlow; // Add pulse glow
+        }
+        ctx.fillStyle = `rgba(0,122,51,${glowIntensity})`; // Celtics green
+        ctx.filter = "blur(20px)";
+        const glowRadius = isPulsing ? (120 + form * 90) * pulseScale : (120 + form * 90);
         ctx.beginPath();
-        ctx.arc(w * 0.5, h * 0.54, 120 + form * 90, 0, Math.PI * 2);
+        ctx.arc(w * 0.5, h * 0.54, glowRadius, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
       }
 
+      // Apply flocking behavior for bird-like cloud movement
+      applyFlocking(particles, form);
+      
       for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
 
         if (form === 0) {
-          p.vx += (Math.random() - 0.5) * opts.jitter;
-          p.vy += (Math.random() - 0.5) * opts.jitter;
+          // Drift phase: gentle movement with flocking
+          p.vx += (Math.random() - 0.5) * opts.jitter * 0.5; // Less jitter
+          p.vy += (Math.random() - 0.5) * opts.jitter * 0.5;
           p.x += p.vx;
           p.y += p.vy;
         } else {
-          const localForm = clamp01(form - p.phase * 0.22);
+          const localForm = clamp01(form - p.phase * 0.08); // Smoother phase offset
 
           const dx = p.tx - p.x;
           const dy = p.ty - p.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
 
-          p.vx += dx * opts.attract * localForm;
-          p.vy += dy * opts.attract * localForm;
+          // Fibonacci spiral approach for smooth, professional motion
+          // When moderately close, use golden angle spiral for elegant convergence
+          let useSpiral = dist < 10 && dist > 1.5 && form > 0.4;
+          
+          if (useSpiral) {
+            // Golden angle (Fibonacci spiral) = 137.508 degrees
+            const GOLDEN_ANGLE = Math.PI * 2 * 0.382; // ~137.5 degrees in radians
+            const spiralIndex = (p.phase * 1000 + i) % 1000; // Unique spiral index per particle
+            const spiralRotation = GOLDEN_ANGLE * spiralIndex;
+            
+            // Current angle to target
+            const targetAngle = Math.atan2(dy, dx);
+            
+            // Spiral direction: rotate by golden angle from radial direction
+            const spiralAngle = targetAngle + spiralRotation;
+            
+            // Calculate spiral forces: radial (toward center) + tangential (spiral motion)
+            const spiralStrength = localForm * (1 - dist / 15); // Stronger when closer
+            const radialForce = 0.6; // 60% toward target
+            const tangentialForce = 0.4; // 40% perpendicular (spiral)
+            
+            // Radial component (toward target)
+            const radialX = dx * radialForce;
+            const radialY = dy * radialForce;
+            
+            // Tangential component (perpendicular to radial, rotated by golden angle)
+            const perpX = -dy;
+            const perpY = dx;
+            const perpLen = Math.sqrt(perpX * perpX + perpY * perpY);
+            const perpNormX = perpLen > 0 ? perpX / perpLen : 0;
+            const perpNormY = perpLen > 0 ? perpY / perpLen : 0;
+            
+            // Tangential force with spiral rotation
+            const tangentX = Math.cos(spiralAngle) * tangentialForce * dist * 0.1;
+            const tangentY = Math.sin(spiralAngle) * tangentialForce * dist * 0.1;
+            
+            // Combined force
+            const forceX = (radialX + tangentX) * opts.attract * spiralStrength * 3.0;
+            const forceY = (radialY + tangentY) * opts.attract * spiralStrength * 3.0;
+            
+            p.vx += forceX;
+            p.vy += forceY;
+          } else {
+            // Direct attraction when far or very close
+            let attractStrength = opts.attract;
+            if (dist < 15) {
+              attractStrength = opts.attract * (2.0 + (15 - dist) / 15 * 3.0);
+            }
+            if (dist < 5) {
+              attractStrength = opts.attract * 6.0;
+            }
+            if (dist < 1.5) {
+              // Lock to target when very close
+              const lockStrength = 0.8;
+              p.x = p.x + (p.tx - p.x) * lockStrength;
+              p.y = p.y + (p.ty - p.y) * lockStrength;
+              p.vx *= 0.3;
+              p.vy *= 0.3;
+            } else {
+              p.vx += dx * attractStrength * localForm;
+              p.vy += dy * attractStrength * localForm;
+            }
+          }
 
-          // swirl
-          p.vx += (-dy) * opts.swirl * localForm * p.spin * 0.010;
-          p.vy += ( dx) * opts.swirl * localForm * p.spin * 0.010;
+          // Reduced swirl for smoother motion (less glitchy)
+          if (!useSpiral) {
+            const swirlStrength = dist > 8 ? opts.swirl * 0.5 : opts.swirl * 0.2;
+            p.vx += (-dy) * swirlStrength * localForm * p.spin * 0.005;
+            p.vy += ( dx) * swirlStrength * localForm * p.spin * 0.005;
+          }
 
-          const jit = opts.jitter * (1 - localForm);
+          // Minimal jitter for smooth, professional motion
+          const jit = opts.jitter * (1 - localForm * localForm * localForm) * Math.min(1, dist / 20) * 0.3; // Much less jitter
           p.vx += (Math.random() - 0.5) * jit;
           p.vy += (Math.random() - 0.5) * jit;
 
-          const damp = opts.damping + localForm * 0.10;
+          // High damping for smooth, professional motion (less bouncing)
+          let damp = 0.92 + localForm * 0.06; // High damping throughout
+          if (dist < 5) {
+            damp = 0.94 + localForm * 0.04; // Even higher damping when close
+          }
           p.vx *= damp;
           p.vy *= damp;
 
+          // Smooth movement
           p.x += p.vx;
           p.y += p.vy;
+          
+          // Smooth locking when close - no abrupt snapping
+          if (form > 0.7) {
+            const currentDist = Math.sqrt((p.x - p.tx) ** 2 + (p.y - p.ty) ** 2);
+            
+            if (currentDist < 0.3) {
+              // Very close: smooth lock
+              const lockStrength = 0.95;
+              p.x = p.x + (p.tx - p.x) * lockStrength;
+              p.y = p.y + (p.ty - p.y) * lockStrength;
+              p.vx *= 0.1;
+              p.vy *= 0.1;
+            } else if (currentDist < 1.5 && form > 0.85) {
+              // Close and formation nearly complete: gentle pull
+              const pull = 0.4;
+              p.x = p.x + (p.tx - p.x) * pull;
+              p.y = p.y + (p.ty - p.y) * pull;
+              p.vx *= 0.6;
+              p.vy *= 0.6;
+            }
+          }
+          
+          // Final lock when fully formed
+          if (form >= 0.98) {
+            const finalDist = Math.sqrt((p.x - p.tx) ** 2 + (p.y - p.ty) ** 2);
+            if (finalDist > 0.05) {
+              // Smooth final positioning
+              const finalLock = 0.98;
+              p.x = p.x + (p.tx - p.x) * finalLock;
+              p.y = p.y + (p.ty - p.y) * finalLock;
+              p.vx = 0;
+              p.vy = 0;
+            } else {
+              p.x = p.tx;
+              p.y = p.ty;
+              p.vx = 0;
+              p.vy = 0;
+            }
+          }
         }
 
         // wrap drift edges
@@ -275,12 +462,73 @@
         if (p.y > h + 10) p.y = -10;
 
         const alpha = 0.18 + form * 0.82;
-        ctx.globalAlpha = alpha;
-        ctx.fillStyle = form > 0.12 ? "rgba(233,238,252,0.92)" : "rgba(233,238,252,0.30)";
-
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-        ctx.fill();
+        
+        // Celtics green color scheme with smooth, cloud-like rendering
+        // Use softer alpha blending for smooth, non-grainy look
+        ctx.globalAlpha = alpha * 0.8; // Softer for smooth blending
+        
+        if (form > 0.12) {
+          // Formed logo: smooth Celtics green with gentle glow
+          ctx.save();
+          
+          // Softer glow for smooth, cloud-like look
+          let glowStrength = form > 0.95 ? 2.5 : 1.2; // Gentler glow
+          if (isPulsing) {
+            glowStrength += pulseGlow * 1.5;
+          }
+          ctx.shadowBlur = glowStrength;
+          ctx.shadowColor = "rgba(0,122,51,0.5)"; // Softer green glow
+          
+          // Smooth color with minimal variation for cloud-like appearance
+          const greenIntensity = 0.85 + Math.random() * 0.15; // Slight variation
+          const isHighlight = Math.random() < 0.06; // Fewer highlights for smoother look
+          
+          // Apply pulse scale to particle size when pulsing
+          const particleRadius = isPulsing ? p.r * pulseScale : p.r;
+          
+          if (isHighlight) {
+            // Soft white highlights
+            ctx.fillStyle = `rgba(255,255,255,${alpha * 0.6})`;
+            ctx.shadowColor = "rgba(255,255,255,0.3)";
+          } else {
+            // Smooth Celtics green - less opaque for cloud-like blending
+            ctx.fillStyle = `rgba(0,122,51,${alpha * greenIntensity * 0.9})`;
+          }
+          
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, particleRadius, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        } else {
+          // Drifting: soft green with smooth blending
+          ctx.globalAlpha = alpha * 0.5;
+          ctx.fillStyle = "rgba(0,122,51,0.3)";
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      
+      // Post-processing: Add subtle fill/blur when logo is fully formed for ultra-solid look
+      if (form > 0.95) {
+        ctx.save();
+        ctx.globalCompositeOperation = "source-over";
+        const fillAlpha = form >= 0.99 ? 0.2 : (form - 0.95) * 20 * 0.15; // Full fill when complete
+        ctx.globalAlpha = fillAlpha;
+        ctx.filter = "blur(0.8px)";
+        // Draw a subtle overlay to fill any tiny gaps - ensures solid, crisp logo
+        for (let i = 0; i < particles.length; i++) {
+          const p = particles[i];
+          const distToTarget = Math.sqrt((p.x - p.tx) ** 2 + (p.y - p.ty) ** 2);
+          if (distToTarget < 3) { // Close to target
+            const fillRadius = isPulsing ? p.r * 0.85 * pulseScale : p.r * 0.85;
+            ctx.fillStyle = "rgba(0,122,51,0.35)";
+            ctx.beginPath();
+            ctx.arc(p.tx, p.ty, fillRadius, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        ctx.restore();
       }
 
       raf = requestAnimationFrame(tick);
@@ -309,9 +557,28 @@
       
       // Load image if not already loaded
       loadImage().then(() => {
-        // Double-check image is actually loaded before proceeding
-        if (!imgLoaded || !img || img.complete === false) {
-          console.error("Image load promise resolved but image not ready");
+        // Double-check image is actually loaded and ready for drawing
+        if (!imgLoaded || !img || !img.complete || img.naturalWidth === 0 || img.naturalHeight === 0) {
+          console.error("Image load promise resolved but image not ready", {
+            imgLoaded,
+            hasImg: !!img,
+            complete: img?.complete,
+            naturalWidth: img?.naturalWidth,
+            naturalHeight: img?.naturalHeight
+          });
+          // Retry after a short delay
+          setTimeout(() => {
+            if (img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+              imgLoaded = true;
+              visible = true;
+              root.classList.add("is-visible");
+              resetSim();
+              if (particles.length > 0) {
+                cancelAnimationFrame(raf);
+                raf = requestAnimationFrame(tick);
+              }
+            }
+          }, 100);
           return;
         }
         visible = true;
@@ -355,10 +622,10 @@
     }
 
     skipBtn.addEventListener("click", () => hide());
-    root.addEventListener("click", (e) => {
-      // allow skip only if clicking UI pill area is NOT required; click anywhere to skip
-      if (e.target === canvas) hide();
-    });
+    // Don't allow clicking canvas to skip - let animation complete fully
+    // root.addEventListener("click", (e) => {
+    //   if (e.target === canvas) hide();
+    // });
 
     window.addEventListener("resize", onResize);
 
@@ -370,7 +637,13 @@
     // start hidden
     hide();
 
-    return { show, hide, destroy, get doneOnce() { return doneOnce; } };
+    return { 
+      show, 
+      hide, 
+      destroy, 
+      get doneOnce() { return doneOnce; },
+      get letsHuddleBtn() { return letsHuddleBtn; }
+    };
   }
 
   window.HuddleParticleLoader = { mount };

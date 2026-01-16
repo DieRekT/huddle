@@ -8,9 +8,44 @@
     <link rel="stylesheet" href="/theme.css">
     <link rel="stylesheet" href="/style.css">
     <link rel="stylesheet" href="/assets/huddle_loader_particles.css">
+    <link rel="stylesheet" href="/assets/intro-animation.css">
 </head>
 <body>
-    <div id="joinScreen" class="screen active">
+    <!-- Intro Screen with Animation -->
+    <div id="introScreen" class="screen active">
+        <!-- Animation Canvas/Container -->
+        <div id="introAnimation" class="intro-animation">
+            <canvas id="introCanvas" class="intro-canvas"></canvas>
+        </div>
+        
+        <!-- Active Rooms Panel - Dropdown at top right -->
+        <div id="activeRoomsPanel" class="active-rooms-panel collapsed" style="opacity: 0;">
+            <div class="active-rooms-header" id="activeRoomsHeader">
+                <h3>Active Rooms</h3>
+            </div>
+            <div id="activeRooms" class="active-rooms-list">
+                <!-- Active rooms will be populated here -->
+            </div>
+            <div id="noActiveRooms" class="no-active-rooms" style="display: none; padding: 0.75rem;">
+                <p>No active rooms at the moment</p>
+            </div>
+        </div>
+        
+        <!-- CTA Buttons -->
+        <div id="introCTA" class="intro-cta" style="opacity: 0; transform: scale(0.8);">
+            <button id="letsHuddleBtn" class="btn btn-primary btn-lets-huddle">
+                Let's Huddle
+            </button>
+            <button id="joinRoomBtn" class="btn btn-secondary btn-join-room">
+                Join Room
+            </button>
+        </div>
+        
+        <!-- Skip Intro (for accessibility) -->
+        <a href="#skip-intro" id="skipIntro" class="skip-intro" tabindex="0" style="position: absolute; left: -9999px;">Skip Intro</a>
+    </div>
+
+    <div id="joinScreen" class="screen">
         <div class="container">
             <div class="hero">
                 <div class="app-mark" aria-hidden="true">
@@ -67,7 +102,7 @@
 
             <div class="button-group">
                 <button id="createBtn" class="btn btn-primary">Create Room</button>
-                <button id="joinBtn" class="btn btn-secondary" style="display: none;">Join Room</button>
+                <button id="joinBtn" class="btn btn-secondary">Join Room</button>
             </div>
 
             <div id="joinError" class="error-message"></div>
@@ -169,6 +204,7 @@
                             <div class="menu-section-title">Actions</div>
                             <button id="copyMicLinkBtn" class="btn btn-secondary btn-small menu-btn">Copy mic link</button>
                             <button id="copyCodeBtn" class="btn btn-secondary btn-small menu-btn">Copy room code</button>
+                            <button id="saveClearBtn" class="btn btn-secondary btn-small menu-btn" title="Save a concise session snapshot, then clear the room for a fresh start">Save & Clear</button>
                             <button id="exportBtn" class="btn btn-secondary btn-small menu-btn">Export</button>
                             <button id="endSessionBtn" class="btn btn-danger btn-small menu-btn">End & delete</button>
                             <button id="leaveViewerBtn" class="btn btn-secondary btn-small menu-btn">Leave</button>
@@ -185,6 +221,7 @@
                 <div class="mic-health-list" id="micHealthList">
                     <!-- Mic chips will be added here: LIVE / QUIET / OFFLINE -->
                 </div>
+                <div class="mic-reliability-banner" id="viewerMicBanner" style="display:none;"></div>
             </div>
 
             <!-- Role Module (Viewer mode / Viewer + Mic) -->
@@ -244,6 +281,18 @@
                 <ul class="actions-list" id="actionsList">
                     <li class="empty-state">No next steps yet. Decisions will appear here.</li>
                 </ul>
+            </div>
+
+            <!-- Topic Log (live history) -->
+            <div class="card awareness-card topic-log-card" id="topicLogCard">
+                <div class="card-header topic-log-header">
+                    <span>Topic log</span>
+                    <button class="btn btn-secondary btn-small" id="topicLogToggleBtn" aria-expanded="false">Show</button>
+                </div>
+                <div class="topic-log-body" id="topicLogBody" style="display:none;">
+                    <div class="topic-log-empty" id="topicLogEmpty">No topic changes yet.</div>
+                    <div class="topic-log-list" id="topicLogList"></div>
+                </div>
             </div>
 
             <!-- WHAT'S BEING SAID card (last 2-4 lines, collapsible) - Minimized by default, can expand -->
@@ -504,8 +553,26 @@
         </div>
     </div>
 
+    <!-- Topic Summary Modal -->
+    <div id="topicSummaryModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Topic summary">
+        <div class="modal-card card">
+            <div class="modal-head">
+                <div>
+                    <div class="modal-title" id="topicSummaryTitle">Topic summary</div>
+                    <div class="muted" id="topicSummaryMeta"></div>
+                </div>
+                <button id="topicSummaryClose" class="btn btn-small btn-secondary">Close</button>
+            </div>
+            <div class="modal-body">
+                <div class="read-room-summary" id="topicSummaryText">Loading…</div>
+                <ul class="read-room-points" id="topicSummaryPoints"></ul>
+            </div>
+        </div>
+    </div>
+
     <script src="realtime_mic.js"></script>
     <script src="/assets/huddle_loader_particles.js"></script>
+    <script src="/assets/intro-animation.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

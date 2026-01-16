@@ -208,3 +208,4 @@ See `docs/ROADMAP.md` for planned features including:
 - Advanced export formats
 - User accounts and room history
 
+

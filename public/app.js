@@ -88,10 +88,22 @@ const TIMESLICE_MS = 5000; // 5s chunks (better phoneme continuity and word boun
 
 // UI Elements
 // Support both the unified single-page app (`index.html`) and split-route pages (`host.html`, `viewer.html`, `mic.html`)
+const introScreen = document.getElementById('introScreen');
 const joinScreen = document.getElementById('joinScreen') || document.getElementById('createRoomScreen');
 const hostScreen = document.getElementById('hostScreen') || document.getElementById('hostRoomScreen');
 const viewerScreen = document.getElementById('viewerScreen');
 const micScreen = document.getElementById('micScreen');
+
+// Intro screen elements
+const introCanvas = document.getElementById('introCanvas');
+const introLogo = document.getElementById('introLogo');
+const activeRoomsPanel = document.getElementById('activeRoomsPanel');
+const activeRooms = document.getElementById('activeRooms');
+const noActiveRooms = document.getElementById('noActiveRooms');
+const introCTA = document.getElementById('introCTA');
+const letsHuddleBtn = document.getElementById('letsHuddleBtn');
+const joinRoomBtn = document.getElementById('joinRoomBtn');
+const skipIntro = document.getElementById('skipIntro');
 
 const userNameInput = document.getElementById('userName');
 const roomCodeInput = document.getElementById('roomCode');
@@ -346,6 +358,15 @@ if (joinBtn) {
         const code = roomCodeInput?.value?.trim().toUpperCase() || '';
         const passcode = joinPasscodeInput?.value?.trim() || null;
         
+        // First click: show room code input if not visible
+        if (roomCodeGroup && roomCodeGroup.style.display === 'none') {
+            roomCodeGroup.style.display = 'block';
+            if (createBtn) createBtn.style.display = 'none';
+            if (roomCodeInput) roomCodeInput.focus();
+            return;
+        }
+        
+        // Second click: actually join
         if (!name) {
             showError('Please enter your name');
             return;
@@ -357,7 +378,7 @@ if (joinBtn) {
         }
         
         userName = name;
-        currentRole = 'mic';
+        currentRole = 'viewer'; // Join as viewer by default, can switch to mic later
         connectAndJoin(code, passcode);
     });
 }
@@ -562,7 +583,146 @@ function detectRouteAndInit() {
     return null;
 }
 
-const routeInfo = detectRouteAndInit();
+// Initialize intro screen
+function initializeIntroScreen() {
+    if (!introScreen) return;
+    
+    // Hide join screen initially
+    if (joinScreen) joinScreen.classList.remove('active');
+    
+    // Load active rooms
+    loadActiveRooms();
+    
+    // Handle "Let's Huddle" button
+    if (letsHuddleBtn) {
+        letsHuddleBtn.addEventListener('click', () => {
+            // Hide intro, show join screen with all options visible
+            if (introScreen) introScreen.classList.remove('active');
+            if (joinScreen) {
+                joinScreen.classList.add('active');
+                // Show all options: Create Room and Join Room buttons both visible
+                if (roomCodeGroup) roomCodeGroup.style.display = 'none';
+                if (createBtn) createBtn.style.display = 'block';
+                if (joinBtn) joinBtn.style.display = 'block';
+            }
+        });
+    }
+    
+    // Handle "Join Room" button on intro screen
+    if (joinRoomBtn) {
+        joinRoomBtn.addEventListener('click', () => {
+            // Hide intro, show join screen in join mode
+            if (introScreen) introScreen.classList.remove('active');
+            if (joinScreen) {
+                joinScreen.classList.add('active');
+                if (roomCodeGroup) roomCodeGroup.style.display = 'block';
+                if (createBtn) createBtn.style.display = 'none';
+                if (joinBtn) joinBtn.style.display = 'block';
+                if (roomCodeInput) roomCodeInput.focus();
+            }
+        });
+    }
+    
+    // Handle skip intro (accessibility)
+    if (skipIntro) {
+        skipIntro.addEventListener('click', (e) => {
+            e.preventDefault();
+            if (introScreen) introScreen.classList.remove('active');
+            if (joinScreen) joinScreen.classList.add('active');
+        });
+    }
+}
+
+// Load and display active rooms
+async function loadActiveRooms() {
+    if (!activeRooms || !noActiveRooms) return;
+    
+    try {
+        const response = await fetch('/api/rooms');
+        const data = await response.json();
+        
+        if (data.rooms && data.rooms.length > 0) {
+            noActiveRooms.style.display = 'none';
+            activeRooms.innerHTML = '';
+            
+            data.rooms.slice(0, 5).forEach((room, index) => { // Show max 5 rooms
+                const roomCard = document.createElement('div');
+                roomCard.className = 'active-room-card';
+                
+                const roomInfo = document.createElement('div');
+                roomInfo.className = 'active-room-info';
+                
+                const code = document.createElement('div');
+                code.className = 'active-room-code';
+                code.textContent = room.code;
+                
+                const meta = document.createElement('div');
+                meta.className = 'active-room-meta';
+                const parts = [];
+                if (room.micCount > 0) parts.push(`${room.micCount} mic${room.micCount !== 1 ? 's' : ''}`);
+                if (room.viewerCount > 0) parts.push(`${room.viewerCount} viewer${room.viewerCount !== 1 ? 's' : ''}`);
+                meta.textContent = parts.length > 0 ? parts.join(', ') : 'Empty';
+                
+                // Avatar cluster
+                const avatarCluster = document.createElement('div');
+                avatarCluster.className = 'active-room-avatar-cluster';
+                const participantCount = (room.micCount || 0) + (room.viewerCount || 0);
+                for (let i = 0; i < Math.min(participantCount, 3); i++) {
+                    const avatar = document.createElement('div');
+                    avatar.className = 'active-room-avatar';
+                    avatarCluster.appendChild(avatar);
+                }
+                meta.appendChild(avatarCluster);
+                
+                roomInfo.appendChild(code);
+                roomInfo.appendChild(meta);
+                
+                const joinBtn = document.createElement('button');
+                joinBtn.className = 'btn btn-join-room-card';
+                joinBtn.textContent = 'Join';
+                joinBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    // Navigate to join screen with room code
+                    if (introScreen) introScreen.classList.remove('active');
+                    if (joinScreen) {
+                        joinScreen.classList.add('active');
+                        if (roomCodeInput) {
+                            roomCodeInput.value = room.code;
+                            roomCodeInput.focus();
+                        }
+                        if (roomCodeGroup) roomCodeGroup.style.display = 'block';
+                        if (createBtn) createBtn.style.display = 'none';
+                        if (joinBtn) document.getElementById('joinBtn').style.display = 'block';
+                    }
+                };
+                
+                roomCard.appendChild(roomInfo);
+                roomCard.appendChild(joinBtn);
+                activeRooms.appendChild(roomCard);
+                
+                // Stagger animation
+                setTimeout(() => {
+                    roomCard.classList.add('visible');
+                }, index * 100);
+            });
+        } else {
+            noActiveRooms.style.display = 'block';
+            activeRooms.innerHTML = '';
+        }
+    } catch (error) {
+        console.error('Failed to load active rooms:', error);
+        if (noActiveRooms) noActiveRooms.style.display = 'block';
+    }
+}
+
+// Initialize intro screen if it exists
+let routeInfo = null;
+if (introScreen) {
+    initializeIntroScreen();
+} else {
+    // No intro screen, proceed with normal flow
+    routeInfo = detectRouteAndInit();
+}
 
 // Get or create deviceId (stable device identity)
 function getDeviceId() {
@@ -591,9 +751,10 @@ function getParticleLoader() {
     return particleLoader;
 }
 
-// Minimum display time for loader - animation needs ~3.3s (0.9s drift + 2.4s settle)
+// Minimum display time for loader - animation needs:
+// 0.9s drift + 3.2s settle + 2.5s pulse = 6.6s total
 // Add buffer for image loading and smooth completion
-const LOADER_MIN_MS = 4000; // 4 seconds to ensure logo forms
+const LOADER_MIN_MS = 7500; // 7.5 seconds to ensure logo forms and pulses
 const LOADER_FADE_MS = 220;
 
 // Helper function to show loader with minimum display time
@@ -1242,10 +1403,7 @@ function connectAndCreate() {
     
     // Create new connection or use existing
     if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-        // Show particle loader before connecting with minimum display time
-        const loader = getParticleLoader();
-        const hideLoaderMinDelay = showLoaderWithMinDuration(loader);
-        
+        // No particle loader for room creation - direct connection
         // Create new WebSocket connection
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}`;
@@ -1258,9 +1416,6 @@ function connectAndCreate() {
             wsConnected = true;
             reconnectAttempts = 0;
             updateStatusBars();
-            
-            // Hide loader with minimum delay
-            hideLoaderMinDelay();
             
             // Send create_room message once connected
             const passcode = roomPasscodeInput?.value?.trim() || null;
@@ -1275,10 +1430,6 @@ function connectAndCreate() {
         ws.onmessage = (event) => {
             try {
                 const message = JSON.parse(event.data);
-                // Hide loader on first meaningful payload
-                if (message && (message.type === 'room_created' || message.type === 'viewer_state' || message.type === 'insights_update' || message.type === 'room_state')) {
-                    hideLoaderMinDelay();
-                }
                 handleMessage(message);
             } catch (error) {
                 console.error('Failed to parse WebSocket message:', error);
@@ -1288,7 +1439,6 @@ function connectAndCreate() {
         
         ws.onerror = (error) => {
             console.error('WebSocket error:', error);
-            hideLoaderMinDelay();
             showError('Connection error. Please refresh the page.');
         };
         
@@ -1296,7 +1446,6 @@ function connectAndCreate() {
             console.log('WebSocket closed');
             wsConnected = false;
             updateStatusBars();
-            hideLoaderMinDelay();
             
             if (currentRoom && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                 const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
@@ -1315,12 +1464,10 @@ function connectAndCreate() {
         };
     } else if (ws.readyState === WebSocket.CONNECTING) {
         // Currently connecting, add handler to send message when open
-        const loader = getParticleLoader();
-        const hideLoaderMinDelay = showLoaderWithMinDuration(loader);
+        // No particle loader for room creation
         const originalOnOpen = ws.onopen;
         ws.onopen = () => {
             if (originalOnOpen) originalOnOpen();
-            hideLoaderMinDelay();
             if (ws.readyState === WebSocket.OPEN) {
                 const passcode = roomPasscodeInput?.value?.trim() || null;
                 ws.send(JSON.stringify({
@@ -1568,9 +1715,10 @@ function handleMessage(message) {
             }
             // If we just created the room, stay on host screen - don't auto-redirect to viewer
             // User will click "Open Room" button to go to viewer screen
+            // BUT: if user manually clicked "Open Room", justCreatedRoom will be false, so show viewer
             if (justCreatedRoom && message.role === 'viewer') {
-                console.log('[App] Ignoring joined message - staying on host screen');
-                justCreatedRoom = false; // Reset flag after handling
+                console.log('[App] Ignoring joined message - staying on host screen (just created room)');
+                // Don't reset justCreatedRoom here - it will be reset when user clicks "Open Room"
                 break;
             }
             if (message.role === 'viewer') {
@@ -1865,6 +2013,8 @@ function showHostScreen() {
     // If this page doesn't include the host DOM, do nothing.
     if (!hostScreen) return;
 
+    // Hide intro screen if it's still active
+    if (introScreen && introScreen.classList) introScreen.classList.remove('active');
     if (joinScreen && joinScreen.classList) joinScreen.classList.remove('active');
     if (micScreen) micScreen.classList.remove('active');
     if (viewerScreen) viewerScreen.classList.remove('active');
@@ -1885,14 +2035,29 @@ function showHostScreen() {
 function showViewerScreen() {
     // If this page doesn't include the viewer DOM (e.g. `/host`), navigate to the viewer route.
     if (!viewerScreen) {
-        if (currentRoom) window.location.assign(`/viewer?room=${encodeURIComponent(currentRoom)}`);
+        if (currentRoom) {
+            window.location.assign(`/viewer?room=${encodeURIComponent(currentRoom)}`);
+        } else {
+            console.error('[App] Cannot show viewer screen: no currentRoom and no viewerScreen element');
+            showToast('No room available. Please create a room first.', 'error');
+        }
         return;
     }
     // On split-route pages, join/host/mic screens may not exist; only toggle what exists.
+    // Hide intro screen if it's still active
+    if (introScreen && introScreen.classList) introScreen.classList.remove('active');
     if (joinScreen && joinScreen.classList) joinScreen.classList.remove('active');
     if (hostScreen && hostScreen.classList) hostScreen.classList.remove('active');
     if (micScreen && micScreen.classList) micScreen.classList.remove('active');
-    viewerScreen.classList.add('active');
+    if (viewerScreen && viewerScreen.classList) {
+        viewerScreen.classList.add('active');
+    } else {
+        console.error('[App] viewerScreen element not found or has no classList');
+        if (currentRoom) {
+            window.location.assign(`/viewer?room=${encodeURIComponent(currentRoom)}`);
+        }
+        return;
+    }
     
     // Update merged room/live pill
     if (roomLivePill && currentRoom) {
@@ -3346,11 +3511,48 @@ function showMissedResult(result) {
 if (hostOpenRoomBtn) {
     hostOpenRoomBtn.addEventListener('click', () => {
         if (!currentRoom) {
-            showToast('No room available', 'warn');
+            showToast('No room available. Please create a room first.', 'warn');
+            console.warn('[App] Open Room clicked but currentRoom is null');
             return;
         }
         justCreatedRoom = false; // Clear flag when user manually opens room
-        showViewerScreen();
+        console.log('[App] Open Room clicked, currentRoom:', currentRoom, 'currentRole:', currentRole);
+        try {
+            // Set role to viewer if not already set
+            if (!currentRole || currentRole === 'host') {
+                currentRole = 'viewer';
+            }
+            // Ensure we're connected as viewer before showing viewer screen
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                // Already connected, send join message as viewer if needed
+                if (currentRole === 'viewer') {
+                    ws.send(JSON.stringify({
+                        type: 'join',
+                        roomCode: currentRoom,
+                        role: 'viewer',
+                        name: userName,
+                        deviceId: deviceId,
+                        passcode: getRoomPasscode(currentRoom)
+                    }));
+                    // showViewerScreen will be called when 'joined' message is received
+                } else {
+                    showViewerScreen();
+                }
+            } else if (currentRoom) {
+                // Not connected, connect as viewer first
+                // showViewerScreen will be called when 'joined' message is received
+                connectAndJoinAsViewer(currentRoom, getRoomPasscode(currentRoom));
+            } else {
+                showViewerScreen();
+            }
+        } catch (error) {
+            console.error('[App] Error showing viewer screen:', error);
+            showToast('Failed to open room. Please try again.', 'error');
+            // Fallback: try navigating to viewer route
+            if (currentRoom) {
+                window.location.assign(`/viewer?room=${encodeURIComponent(currentRoom)}`);
+            }
+        }
     });
 }
 

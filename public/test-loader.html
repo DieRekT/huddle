@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Huddle Loader</title>
+    <link rel="stylesheet" href="/assets/huddle_loader_particles.css">
+</head>
+<body>
+    <div style="padding: 20px; color: white; font-family: sans-serif;">
+        <h1>Huddle Loader Test</h1>
+        <p>Click the button below to test the particle animation.</p>
+        <button id="testBtn" style="padding: 10px 20px; font-size: 16px; cursor: pointer;">Show Loader</button>
+        <div id="status" style="margin-top: 20px;"></div>
+    </div>
+
+    <script src="/assets/huddle_loader_particles.js"></script>
+    <script>
+        const statusEl = document.getElementById('status');
+        let loader = null;
+
+        document.getElementById('testBtn').addEventListener('click', () => {
+            if (!loader) {
+                loader = window.HuddleParticleLoader.mount();
+                statusEl.textContent = 'Loader mounted. Showing animation...';
+            }
+            
+            loader.show();
+            
+            // Log when animation completes
+            const checkInterval = setInterval(() => {
+                if (loader.doneOnce) {
+                    clearInterval(checkInterval);
+                    statusEl.textContent = 'Animation completed! Logo should be visible.';
+                }
+            }, 100);
+            
+            // Auto-hide after 5 seconds for testing
+            setTimeout(() => {
+                loader.hide();
+                statusEl.textContent = 'Loader hidden. Click button again to replay.';
+            }, 5000);
+        });
+
+        // Check if image loads
+        const testImg = new Image();
+        testImg.onload = () => {
+            statusEl.textContent += ' ✓ Image loaded successfully.';
+        };
+        testImg.onerror = () => {
+            statusEl.textContent += ' ✗ Image failed to load!';
+        };
+        testImg.src = '/assets/huddle-wordmark.png';
+    </script>
+</body>
+</html>
+
+

@@ -1,0 +1,374 @@
+/* Intro Screen Styles */
+
+#introScreen {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(ellipse at center, 
+    rgba(75, 85, 135, 0.3) 0%, 
+    rgba(30, 35, 60, 0.6) 50%, 
+    rgba(15, 18, 30, 0.95) 100%);
+  overflow: hidden;
+  z-index: 1000;
+}
+
+/* Animation Container */
+.intro-animation {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.intro-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.intro-logo {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 200px;
+  height: 200px;
+  background-image: url('/assets/huddle-wordmark.png');
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+  filter: drop-shadow(0 0 30px rgba(255, 255, 255, 0.3));
+  transition: opacity 0.5s ease, filter 0.5s ease;
+  z-index: 10;
+}
+
+/* Active Rooms Panel - Dropdown at top right */
+.active-rooms-panel {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  max-width: 320px;
+  background: rgba(20, 25, 40, 0.95);
+  backdrop-filter: blur(10px);
+  border-radius: 12px;
+  padding: 0;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  transition: opacity 0.6s cubic-bezier(0.4, 0, 0.2, 1),
+              transform 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 100;
+  overflow: hidden;
+  max-height: 0;
+  transform: translateY(-10px);
+}
+
+.active-rooms-panel.visible {
+  opacity: 1;
+  transform: translateY(0);
+  /* Starts collapsed - only header visible */
+  max-height: 50px;
+}
+
+.active-rooms-panel.visible:not(.collapsed) {
+  max-height: 500px;
+}
+
+.active-rooms-header {
+  padding: 0.75rem 1rem;
+  margin: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  transition: background 0.2s ease;
+}
+
+.active-rooms-header:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.active-rooms-header h3 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+  margin: 0;
+}
+
+.active-rooms-header::after {
+  content: '▼';
+  font-size: 0.7rem;
+  color: rgba(255, 255, 255, 0.6);
+  transition: transform 0.3s ease;
+}
+
+.active-rooms-panel.collapsed .active-rooms-header::after {
+  transform: rotate(-90deg);
+}
+
+.active-rooms-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 0.75rem;
+  transition: max-height 0.3s ease;
+}
+
+.active-rooms-panel.collapsed .active-rooms-list {
+  max-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.active-room-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  opacity: 0;
+  transform: translateX(-10px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.active-room-card.visible {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.active-room-card:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+  transform: translateX(4px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.active-room-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  flex: 1;
+}
+
+.active-room-code {
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.active-room-meta {
+  font-size: 0.85rem;
+  color: rgba(255, 255, 255, 0.7);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.active-room-avatar-cluster {
+  display: flex;
+  gap: -4px;
+  margin-left: 0.5rem;
+}
+
+.active-room-avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(0, 122, 51, 0.8), rgba(0, 150, 63, 0.8));
+  border: 2px solid rgba(20, 25, 40, 0.8);
+  margin-left: -4px;
+}
+
+.active-room-card .btn-join-room-card {
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  background: rgba(0, 122, 51, 0.2);
+  border: 1px solid rgba(0, 122, 51, 0.4);
+  color: rgba(255, 255, 255, 0.9);
+  border-radius: 8px;
+  transition: all 0.2s ease;
+}
+
+.active-room-card .btn-join-room-card:hover {
+  background: rgba(0, 122, 51, 0.4);
+  border-color: rgba(0, 122, 51, 0.6);
+}
+
+.no-active-rooms {
+  text-align: center;
+  padding: 2rem 1rem;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.9rem;
+}
+
+/* CTA Buttons */
+.intro-cta {
+  position: absolute;
+  bottom: 15%;
+  left: 50%;
+  transform: translateX(-50%) scale(0.8);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  transition: opacity 0.6s cubic-bezier(0.4, 0, 0.2, 1),
+              transform 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 200;
+}
+
+.intro-cta.visible {
+  opacity: 1;
+  transform: translateX(-50%) scale(1);
+}
+
+.btn-lets-huddle {
+  font-size: 1.2rem;
+  font-weight: 700;
+  padding: 1rem 2.5rem;
+  border-radius: 50px;
+  background: linear-gradient(135deg, rgba(0, 122, 51, 0.9), rgba(0, 150, 63, 0.9));
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  color: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 8px 24px rgba(0, 122, 51, 0.4),
+              0 0 40px rgba(0, 122, 51, 0.2);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-lets-huddle::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  transform: translate(-50%, -50%);
+  transition: width 0.6s ease, height 0.6s ease;
+}
+
+.btn-lets-huddle:hover::before {
+  width: 300px;
+  height: 300px;
+}
+
+.btn-lets-huddle:hover {
+  transform: scale(1.05);
+  box-shadow: 0 12px 32px rgba(0, 122, 51, 0.5),
+              0 0 60px rgba(0, 122, 51, 0.3);
+}
+
+.btn-lets-huddle:active {
+  transform: scale(0.98);
+}
+
+/* Pulsing animation for idle state */
+.btn-lets-huddle.pulse {
+  animation: pulseGlow 3s ease-in-out infinite;
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 8px 24px rgba(0, 122, 51, 0.4),
+                0 0 40px rgba(0, 122, 51, 0.2);
+  }
+  50% {
+    transform: scale(1.02);
+    box-shadow: 0 10px 28px rgba(0, 122, 51, 0.5),
+                0 0 50px rgba(0, 122, 51, 0.3);
+  }
+}
+
+.btn-join-room {
+  font-size: 0.95rem;
+  padding: 0.75rem 1.5rem;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: rgba(255, 255, 255, 0.9);
+  border-radius: 50px;
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+
+.btn-join-room:hover {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.3);
+  transform: translateY(-2px);
+}
+
+/* Skip Intro (Accessibility) */
+.skip-intro {
+  position: absolute;
+  left: -9999px;
+  z-index: 9999;
+}
+
+.skip-intro:focus {
+  left: 1rem;
+  top: 1rem;
+  padding: 0.5rem 1rem;
+  background: rgba(0, 0, 0, 0.8);
+  color: white;
+  border-radius: 4px;
+  text-decoration: none;
+  z-index: 9999;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .active-rooms-panel {
+    right: 5%;
+    left: 5%;
+    max-width: none;
+    bottom: 30%;
+  }
+  
+  .intro-cta {
+    bottom: 10%;
+    width: 90%;
+  }
+  
+  .btn-lets-huddle {
+    width: 100%;
+  }
+  
+  .btn-join-room {
+    width: 100%;
+  }
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .intro-cta,
+  .active-rooms-panel,
+  .active-room-card {
+    transition: none;
+    animation: none;
+  }
+  
+  .btn-lets-huddle.pulse {
+    animation: none;
+  }
+}
+
+

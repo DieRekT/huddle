@@ -56,12 +56,43 @@
   font-weight: 800;
   padding: 7px 11px;
   border-radius: 999px;
-  background: rgba(38,194,129,0.14);
-  color: rgba(233,238,252,0.95);
-  border: 1px solid rgba(38,194,129,0.35);
+  background: rgba(0,122,51,0.2); /* Celtics green */
+  color: rgba(255,255,255,0.95);
+  border: 1px solid rgba(0,122,51,0.5); /* Celtics green border */
 }
 
 .huddle-loader-skip:hover { filter: brightness(1.05); }
+
+.huddle-loader-lets-huddle {
+  position: absolute;
+  bottom: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 0;
+  cursor: pointer;
+  font-weight: 800;
+  padding: 16px 32px;
+  border-radius: 999px;
+  background: rgba(0,122,51,0.9); /* Celtics green */
+  color: rgba(255,255,255,0.95);
+  border: 2px solid rgba(255,255,255,0.2);
+  font-size: 1.1rem;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.5s ease, transform 0.3s ease;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+
+.huddle-loader-lets-huddle.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.huddle-loader-lets-huddle:hover {
+  transform: translateX(-50%) scale(1.05);
+  filter: brightness(1.1);
+  box-shadow: 0 12px 32px rgba(0,122,51,0.4);
+}
 
 @media (prefers-reduced-motion: reduce) {
   .huddle-loader-overlay { display: none !important; }

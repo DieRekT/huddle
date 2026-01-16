@@ -2440,6 +2440,42 @@ app.post('/api/realtime/transcript', async (req, res) => {
 });
 
 // Network helper endpoint (used by client to build share links from localhost)
+// Get list of active rooms (public info only)
+app.get('/api/rooms', (req, res) => {
+  try {
+    const activeRooms = [];
+    const now = Date.now();
+    
+    for (const [code, room] of rooms.entries()) {
+      // Only include rooms that are not expired
+      const age = now - room.createdAt;
+      if (age < ROOM_TTL_MS) {
+        const clientCount = room.clients.size;
+        const micCount = Array.from(room.clients.values()).filter(c => c.role === 'mic').length;
+        const viewerCount = Array.from(room.clients.values()).filter(c => c.role === 'viewer').length;
+        
+        activeRooms.push({
+          code: code,
+          createdAt: room.createdAt,
+          clientCount: clientCount,
+          micCount: micCount,
+          viewerCount: viewerCount,
+          hasPasscode: !!room.passcode,
+          // Don't expose passcode or admin token
+        });
+      }
+    }
+    
+    // Sort by most recent first
+    activeRooms.sort((a, b) => b.createdAt - a.createdAt);
+    
+    res.json({ rooms: activeRooms });
+  } catch (error) {
+    console.error('Error fetching active rooms:', error);
+    res.status(500).json({ error: 'Failed to fetch rooms' });
+  }
+});
+
 app.get('/api/network', (req, res) => {
   const lanIp = getLanIp();
   const publicBaseUrl = String(process.env.PUBLIC_BASE_URL || '').trim() || null;
