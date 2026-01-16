@@ -2512,7 +2512,7 @@ function updateMicRoomStatus(room) {
 }
 
 // Update HERO TOPIC CARD - Show topic IMMEDIATELY (even low confidence for deaf users who need context NOW)
-// With debouncing to prevent rapid topic changes
+// With debouncing to prevent rapid topic changes, but always show newest topic
 function updateSituationCard(listeningStatus, summary) {
     if (!topicMain) return;
     
@@ -2523,29 +2523,39 @@ function updateSituationCard(listeningStatus, summary) {
     const currentTopic = topicMain.textContent;
     const newTopic = hasTopic && topicConfidence >= 0.3 ? summary.topic : null;
     
-    // Debouncing logic: don't change topic too quickly
-    if (newTopic && newTopic !== currentTopic) {
+    // Always update immediately if there's no current topic or if it's the same topic
+    const isFirstTopic = !currentTopic || currentTopic === 'Listening…' || currentTopic.trim().length === 0;
+    
+    // Debouncing logic: don't change topic too quickly, but always store the newest
+    if (newTopic && newTopic !== currentTopic && !isFirstTopic) {
         // If we have a pending update or recently updated, debounce
         if (lastTopicUpdate && (now - lastTopicUpdate) < TOPIC_UPDATE_DEBOUNCE_MS) {
-            // Store pending update
-            pendingTopicUpdate = { summary, listeningStatus };
-            // Clear existing timeout and set new one
+            // Always store the newest pending update (replaces any older pending update)
+            pendingTopicUpdate = { summary, listeningStatus, timestamp: now };
+            // Clear existing timeout and set new one to show the newest topic after debounce
             if (window.__topicUpdateTimeout) clearTimeout(window.__topicUpdateTimeout);
             window.__topicUpdateTimeout = setTimeout(() => {
                 if (pendingTopicUpdate) {
+                    // Apply the newest pending update
                     updateSituationCardImmediate(pendingTopicUpdate.listeningStatus, pendingTopicUpdate.summary);
                     pendingTopicUpdate = null;
                     lastTopicUpdate = Date.now();
                 }
             }, TOPIC_UPDATE_DEBOUNCE_MS - (now - lastTopicUpdate));
-            return; // Don't update yet
+            return; // Don't update yet - wait for debounce
         }
     }
     
-    // Immediate update (either no change, or enough time has passed)
+    // Immediate update (either first topic, no change, or enough time has passed)
     updateSituationCardImmediate(listeningStatus, summary);
     if (newTopic && newTopic !== currentTopic) {
         lastTopicUpdate = now;
+        // Clear any pending update since we just updated immediately
+        pendingTopicUpdate = null;
+        if (window.__topicUpdateTimeout) {
+            clearTimeout(window.__topicUpdateTimeout);
+            window.__topicUpdateTimeout = null;
+        }
     }
 }
 
