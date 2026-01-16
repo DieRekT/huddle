@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Huddle - Host</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/theme.css">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <!-- Create Room Screen -->
+    <div id="createRoomScreen" class="screen active">
+        <div class="container">
+            <div class="hero">
+                <div class="app-mark" aria-hidden="true">
+                    <svg class="huddle-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+                        <circle cx="32" cy="32" r="2" fill="currentColor" opacity="0.9"/>
+                        <circle cx="32" cy="32" r="8" stroke="currentColor" stroke-width="2" opacity="0.6"/>
+                        <circle cx="32" cy="32" r="14" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
+                        <circle cx="32" cy="32" r="20" stroke="currentColor" stroke-width="1" opacity="0.3"/>
+                        <rect x="28" y="18" width="8" height="12" rx="4" fill="currentColor"/>
+                        <path d="M 26 30 L 24 38 L 40 38 L 38 30 Z" fill="currentColor"/>
+                        <path d="M 18 32 Q 22 28, 26 32 Q 30 36, 34 32" stroke="currentColor" stroke-width="2" fill="none" opacity="0.7" stroke-linecap="round"/>
+                        <path d="M 38 32 Q 42 28, 46 32" stroke="currentColor" stroke-width="1.5" fill="none" opacity="0.5" stroke-linecap="round"/>
+                    </svg>
+                </div>
+                <h1>Huddle</h1>
+                <p class="subtitle">Create a room to start</p>
+            </div>
+            
+            <div class="card join-card">
+                <div class="form-group">
+                    <label for="userName">Your Name</label>
+                    <input type="text" id="userName" placeholder="Enter your name" required>
+                </div>
+
+                <div class="button-group">
+                    <button id="createBtn" class="btn btn-primary">Create Room</button>
+                </div>
+
+                <div id="createError" class="error-message"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Host Room Screen -->
+    <div id="hostRoomScreen" class="screen">
+        <div class="container">
+            <div class="hero">
+                <div class="app-mark" aria-hidden="true">
+                    <svg class="huddle-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+                        <circle cx="32" cy="32" r="2" fill="currentColor" opacity="0.9"/>
+                        <circle cx="32" cy="32" r="8" stroke="currentColor" stroke-width="2" opacity="0.6"/>
+                        <circle cx="32" cy="32" r="14" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
+                        <circle cx="32" cy="32" r="20" stroke="currentColor" stroke-width="1" opacity="0.3"/>
+                        <rect x="28" y="18" width="8" height="12" rx="4" fill="currentColor"/>
+                        <path d="M 26 30 L 24 38 L 40 38 L 38 30 Z" fill="currentColor"/>
+                        <path d="M 18 32 Q 22 28, 26 32 Q 30 36, 34 32" stroke="currentColor" stroke-width="2" fill="none" opacity="0.7" stroke-linecap="round"/>
+                        <path d="M 38 32 Q 42 28, 46 32" stroke="currentColor" stroke-width="1.5" fill="none" opacity="0.5" stroke-linecap="round"/>
+                    </svg>
+                </div>
+                <h1>Room Created</h1>
+                <p class="subtitle">Invite others to monitor the conversation</p>
+            </div>
+            
+            <div class="card join-card">
+                <div class="form-group" style="text-align: center;">
+                    <label>Room Code</label>
+                    <div style="font-size: 2rem; font-weight: bold; letter-spacing: 0.2em; margin: 1rem 0; font-family: monospace;" id="hostRoomCode">-----</div>
+                </div>
+
+                <!-- This device can be a microphone -->
+                <div class="card" style="margin-top: 1.5rem; padding: 1rem; background: rgba(0, 122, 51, 0.05); border-color: rgba(0, 122, 51, 0.2);">
+                    <div style="font-size: 0.875rem; color: rgba(0,0,0,0.7); margin-bottom: 0.5rem;">
+                        <strong>This device can be a microphone.</strong>
+                    </div>
+                    <div id="hostMicStatus" style="display: none;">
+                        <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
+                            <span class="role-module-mic-chip" id="hostMicChip">LIVE</span>
+                            <span style="font-size: 0.875rem;">Mic active</span>
+                        </div>
+                        <div class="mic-meter-container" style="margin-top: 0.5rem;">
+                            <label class="mic-meter-label">Mic level</label>
+                            <div class="mic-meter-wrapper">
+                                <progress id="hostMicMeter" max="1" value="0" class="mic-meter-large"></progress>
+                                <span id="hostMicMeterText" class="mic-meter-text-large">0%</span>
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem; margin-top: 0.75rem;">
+                            <button id="hostMuteBtn" class="btn btn-secondary btn-small">Mute</button>
+                            <button id="hostDisableMicBtn" class="btn btn-secondary btn-small">Disable microphone</button>
+                        </div>
+                    </div>
+                    <div id="hostMicEnable" style="display: block;">
+                        <button id="hostEnableMicBtn" class="btn btn-secondary btn-small">Enable microphone</button>
+                    </div>
+                </div>
+
+                <div class="button-group" style="margin-top: 2rem;">
+                    <button id="hostInviteBtn" class="btn btn-primary">Invite</button>
+                    <button id="hostOpenRoomBtn" class="btn btn-secondary">Open Room</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Invite Modal (QR + copy link) -->
+    <div id="inviteModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Invite viewers">
+        <div class="modal-card card">
+            <div class="modal-head">
+                <div>
+                    <div class="modal-title">Invite Viewers</div>
+                    <div class="muted">Scan the QR code to join as a viewer (read-only monitoring).</div>
+                </div>
+                <button id="inviteClose" class="btn btn-small btn-secondary">Close</button>
+            </div>
+
+            <div class="modal-body">
+                <div class="field">
+                    <div class="label">Viewer invite link (default)</div>
+                    <div class="row">
+                        <input id="viewerInviteLink" class="input" readonly />
+                        <button id="copyViewerLink" class="btn btn-small btn-secondary">Copy</button>
+                    </div>
+                    <div class="muted" style="margin-top: 8px;">
+                        Viewers can monitor the conversation. They can optionally enable microphone to contribute audio.
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="label">QR code</div>
+                    <div class="qr-wrap card">
+                        <img id="viewerQrImg" alt="Viewer invite QR code" />
+                    </div>
+                    <div class="muted" style="margin-top:8px">
+                        Tip: On iPad, scan with the Camera app. Tap the banner to open the link.
+                    </div>
+                </div>
+
+                <div class="field" style="margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border);">
+                    <div class="label">Add a speaker mic (optional)</div>
+                    <div class="row">
+                        <input id="micInviteLink" class="input" readonly />
+                        <button id="copyMicLink" class="btn btn-small btn-secondary">Copy</button>
+                    </div>
+                    <div class="muted" style="margin-top: 8px;">
+                        Use this link if you want a device to join as microphone only (no viewer UI).
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/realtime_mic.js"></script>
+    <script src="/app.js"></script>
+</body>
+</html>
+
+
+

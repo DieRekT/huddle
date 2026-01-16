@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Huddle - Viewer</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/theme.css">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <!-- Viewer Screen -->
+    <div id="viewerScreen" class="screen viewer-screen-dark active">
+        <!-- Sticky top bar: Huddle mark + wordmark + merged room/live status + buttons -->
+        <div class="topbar topbar-sticky topbar-dark">
+            <div class="topbar-left">
+                <div class="brand">
+                    <svg class="huddle-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" aria-hidden="true">
+                        <circle cx="32" cy="32" r="2" fill="currentColor" opacity="0.9"/>
+                        <circle cx="32" cy="32" r="8" stroke="currentColor" stroke-width="2" opacity="0.6"/>
+                        <circle cx="32" cy="32" r="14" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
+                        <circle cx="32" cy="32" r="20" stroke="currentColor" stroke-width="1" opacity="0.3"/>
+                        <rect x="28" y="18" width="8" height="12" rx="4" fill="currentColor"/>
+                        <path d="M 26 30 L 24 38 L 40 38 L 38 30 Z" fill="currentColor"/>
+                        <path d="M 18 32 Q 22 28, 26 32 Q 30 36, 34 32" stroke="currentColor" stroke-width="2" fill="none" opacity="0.7" stroke-linecap="round"/>
+                        <path d="M 38 32 Q 42 28, 46 32" stroke="currentColor" stroke-width="1.5" fill="none" opacity="0.5" stroke-linecap="round"/>
+                    </svg>
+                    <span class="brand-text">Huddle</span>
+                </div>
+                <div class="room-live-pill room-pill-dark" id="roomLivePill" title="Room code and status">
+                    <span class="room-pill-code" id="viewerRoomCode"></span>
+                    <span class="room-live-separator">•</span>
+                    <span class="live-indicator"></span>
+                    <span class="live-text">LIVE</span>
+                </div>
+            </div>
+            <div class="topbar-right">
+                <button id="btnInvite" class="btn btn-secondary btn-small">Invite</button>
+                <button id="catchUpBtn" class="btn btn-secondary btn-small">Catch-up</button>
+                <button id="readRoomBtn" class="btn btn-primary btn-small">Read the Room</button>
+                <button id="viewerMicBtn" class="btn btn-secondary btn-small" title="Enable microphone (then click to mute/unmute)">Enable mic</button>
+                <button id="zenModeToggle" class="btn btn-secondary btn-small" title="Zen mode: hide transcript">Zen</button>
+                <details class="menu">
+                    <summary class="icon-btn" aria-label="More actions">⋯</summary>
+                    <div class="menu-panel card">
+                        <div class="menu-title">Menu</div>
+                        <div class="menu-section">
+                            <div class="menu-section-title">Accessibility</div>
+                            <button id="fontSizeToggle" class="btn btn-secondary btn-small menu-btn">Font size: Normal</button>
+                            <button id="highContrastToggle" class="btn btn-secondary btn-small menu-btn">High contrast: Off</button>
+                        </div>
+                        <div class="menu-divider"></div>
+                        <div class="menu-section">
+                            <div class="menu-section-title">Actions</div>
+                            <button id="disableMicMenuBtn" class="btn btn-secondary btn-small menu-btn" style="display:none;">Disable mic</button>
+                            <button id="copyMicLinkBtn" class="btn btn-secondary btn-small menu-btn">Copy mic link</button>
+                            <button id="copyCodeBtn" class="btn btn-secondary btn-small menu-btn">Copy room code</button>
+                            <button id="exportBtn" class="btn btn-secondary btn-small menu-btn">Export</button>
+                            <button id="endSessionBtn" class="btn btn-danger btn-small menu-btn">End & delete</button>
+                            <button id="leaveViewerBtn" class="btn btn-secondary btn-small menu-btn">Leave</button>
+                        </div>
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <!-- Awareness Stack Layout - Topic-First Design for Deaf Users -->
+        <div class="awareness-stack">
+            <div class="viewer-layout">
+                <div class="viewer-main">
+                    <!-- HERO TOPIC CARD - Large, prominent, always visible (sticky) -->
+                    <div class="card hero-topic-card" id="heroTopicCard">
+                        <div class="hero-topic-content">
+                            <div class="hero-topic-label">What's happening now:</div>
+                            <div class="hero-topic-text" id="topicMain">Connecting…</div>
+                            <div class="hero-topic-subtitle" id="topicSub">Joining room</div>
+                            <div class="hero-topic-meta">
+                                <span class="hero-status-badge" id="statusBadge">Connecting</span>
+                                <span class="hero-confidence" id="confidence"></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- WHAT'S HAPPENING NOW - Summary card (prominent) -->
+                    <div class="card awareness-card summary-card">
+                        <div class="card-header">
+                            <span>What's happening now</span>
+                            <button class="btn btn-secondary btn-small summary-analyze-title-btn" id="analyzeTitleBtn" title="Analyze discussion title">
+                                Analyze Title
+                            </button>
+                        </div>
+                        <div class="summary-content-wrapper">
+                            <div class="summary-content-now" id="rollingSummary">Connecting to room...</div>
+                    <div class="summary-live-row" id="liveNowRow" style="display:none;">
+                        <div class="summary-live-label">Live</div>
+                        <div class="summary-live-text" id="liveNowText"></div>
+                        <div class="summary-live-meta" id="liveNowMeta"></div>
+                    </div>
+                            <button class="summary-read-more" id="summaryReadMore" style="display: none;">Read more</button>
+                        </div>
+                        <div class="summary-updated" id="summaryUpdated"></div>
+                    </div>
+
+                    <!-- KEY POINTS card (max 3 bullets) -->
+                    <div class="card awareness-card key-points-card">
+                        <div class="card-header">Key Points</div>
+                        <ul class="key-points-list" id="keyPointsList">
+                            <li class="empty-state">No key points yet. Speak to generate insights.</li>
+                        </ul>
+                    </div>
+
+                    <!-- NEXT STEPS card (max 3 bullets) -->
+                    <div class="card awareness-card actions-card">
+                        <div class="card-header">Next Steps</div>
+                        <ul class="actions-list" id="actionsList">
+                            <li class="empty-state">No next steps yet. Decisions will appear here.</li>
+                        </ul>
+                    </div>
+
+                    <!-- Catch-up Panel -->
+                    <div id="catchUpPanel" class="card awareness-card catchup-card" style="display: none;">
+                        <div class="card-header">Catch-up</div>
+                        <div class="catchup-content">
+                            <p id="missedSummary"></p>
+                            <ul id="missedPoints"></ul>
+                        </div>
+                    </div>
+
+                    <!-- Read the Room Panel -->
+                    <div id="readRoomPanel" class="card awareness-card read-room-panel" style="display: none;">
+                        <div class="card-header">
+                            <span>Full Room Overview</span>
+                            <button class="btn btn-secondary btn-small" id="readRoomCloseBtn">Close</button>
+                        </div>
+                        <div class="read-room-content">
+                            <div class="read-room-summary" id="readRoomSummary">Generating full overview...</div>
+                            <ul class="read-room-points" id="readRoomPoints"></ul>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="viewer-side">
+                    <!-- Mic health indicator strip -->
+                    <div class="mic-health-strip" id="micHealthStrip">
+                        <div class="mic-health-list" id="micHealthList">
+                            <!-- Mic chips will be added here -->
+                        </div>
+                        <div class="mic-reliability-banner" id="viewerMicBanner" style="display:none;"></div>
+                    </div>
+
+                    <!-- Topic Log (live history) -->
+                    <div class="card awareness-card topic-log-card" id="topicLogCard">
+                        <div class="card-header topic-log-header">
+                            <span>Topic log</span>
+                            <button class="btn btn-secondary btn-small" id="topicLogToggleBtn" aria-expanded="false">Show</button>
+                        </div>
+                        <div class="topic-log-body" id="topicLogBody" style="display:none;">
+                            <div class="topic-log-empty" id="topicLogEmpty">No topic changes yet.</div>
+                            <div class="topic-log-list" id="topicLogList"></div>
+                        </div>
+                    </div>
+
+                    <!-- Transcript card (secondary but always reachable) -->
+                    <div class="card awareness-card transcript-card" id="transcriptCard">
+                        <div class="card-header transcript-header-collapsible">
+                            <span>What's Being Said</span>
+                            <div class="transcript-header-actions">
+                                <button id="transcriptToggle" class="btn btn-small btn-secondary" title="Show/hide transcript">Hide</button>
+                                <button id="jumpLiveBtn" class="btn btn-small btn-secondary" style="display:none;">Jump to live</button>
+                            </div>
+                        </div>
+                        <div class="transcript-content-compact" id="transcriptContent">
+                            <div class="empty-state">Listening…</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Topic Shift Alert -->
+            <div id="topicShiftAlert" class="alert alert-info" style="display: none;">
+                <strong>Topic changed:</strong> <span id="topicShiftText"></span>
+            </div>
+        </div>
+
+        <!-- Hidden status bar for debugging (truth indicators) -->
+        <div class="statusbar statusbar-hidden" id="viewerStatusBar">
+            <span class="status-item">
+                <span class="status-dot" id="viewerWsDot"></span>
+                <span class="status-label">WS</span>
+                <span class="status-value" id="viewerWsStatus">connecting…</span>
+            </span>
+            <span class="status-item">
+                <span class="status-label">Mics</span>
+                <span class="status-value" id="viewerMicsStatus">0</span>
+            </span>
+            <span class="status-item">
+                <span class="status-label">Last transcript</span>
+                <span class="status-value" id="viewerLastTranscript">—</span>
+            </span>
+            <span class="status-item status-item-warn" id="viewerWarnItem" style="display:none;">
+                <span class="status-label">Issue</span>
+                <span class="status-value" id="viewerWarnText"></span>
+            </span>
+        </div>
+    </div>
+
+    <!-- Invite Modal (QR + copy link) -->
+    <div id="inviteModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Invite viewers">
+        <div class="modal-card card">
+            <div class="modal-head">
+                <div>
+                    <div class="modal-title">Invite Viewers</div>
+                    <div class="muted">Scan the QR code to join as a viewer (read-only monitoring).</div>
+                </div>
+                <button id="inviteClose" class="btn btn-small btn-secondary">Close</button>
+            </div>
+
+            <div class="modal-body">
+                <div class="field">
+                    <div class="label">Viewer invite link (default)</div>
+                    <div class="row">
+                        <input id="viewerInviteLink" class="input" readonly />
+                        <button id="copyViewerLink" class="btn btn-small btn-secondary">Copy</button>
+                    </div>
+                    <div class="muted" style="margin-top: 8px;">
+                        Viewers can monitor the conversation. They can optionally enable microphone to contribute audio.
+                    </div>
+                </div>
+
+                <div class="field">
+                    <div class="label">QR code</div>
+                    <div class="qr-wrap card">
+                        <img id="viewerQrImg" alt="Viewer invite QR code" />
+                    </div>
+                    <div class="muted" style="margin-top:8px">
+                        Tip: On iPad, scan with the Camera app. Tap the banner to open the link.
+                    </div>
+                </div>
+
+                <div class="field" style="margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border);">
+                    <div class="label">Add a speaker mic (optional)</div>
+                    <div class="row">
+                        <input id="micInviteLink" class="input" readonly />
+                        <button id="copyMicLink" class="btn btn-small btn-secondary">Copy</button>
+                    </div>
+                    <div class="muted" style="margin-top: 8px;">
+                        Use this link if you want a device to join as microphone only (no viewer UI).
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Topic Summary Modal -->
+    <div id="topicSummaryModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Topic summary">
+        <div class="modal-card card">
+            <div class="modal-head">
+                <div>
+                    <div class="modal-title" id="topicSummaryTitle">Topic summary</div>
+                    <div class="muted" id="topicSummaryMeta"></div>
+                </div>
+                <button id="topicSummaryClose" class="btn btn-small btn-secondary">Close</button>
+            </div>
+            <div class="modal-body">
+                <div class="read-room-summary" id="topicSummaryText">Loading…</div>
+                <ul class="read-room-points" id="topicSummaryPoints"></ul>
+            </div>
+        </div>
+    </div>
+
+    <script src="/realtime_mic.js"></script>
+    <script src="/app.js"></script>
+</body>
+</html>
+
+
+

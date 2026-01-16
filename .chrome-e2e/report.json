@@ -1,0 +1,126 @@
+{
+  "startedAt": "2026-01-16T14:44:04.749Z",
+  "baseUrl": "http://localhost:8787",
+  "chromeBin": "/usr/bin/google-chrome",
+  "steps": [
+    {
+      "at": "2026-01-16T14:44:05.297Z",
+      "step": "open_host",
+      "url": "http://localhost:8787/host"
+    },
+    {
+      "at": "2026-01-16T14:44:05.559Z",
+      "step": "room_created",
+      "roomCode": "7A1729"
+    },
+    {
+      "at": "2026-01-16T14:44:05.644Z",
+      "step": "open_room_click"
+    },
+    {
+      "at": "2026-01-16T14:44:05.700Z",
+      "step": "viewer_opened",
+      "url": "http://localhost:8787/viewer?room=7A1729"
+    },
+    {
+      "at": "2026-01-16T14:44:06.185Z",
+      "step": "viewer_mic_button_present",
+      "text": "Enable mic"
+    },
+    {
+      "at": "2026-01-16T14:44:06.185Z",
+      "step": "viewer_mic_button_click_enable"
+    },
+    {
+      "at": "2026-01-16T14:44:06.328Z",
+      "step": "viewer_mic_button_enabled",
+      "text": "Mic on"
+    },
+    {
+      "at": "2026-01-16T14:44:06.724Z",
+      "step": "invite_modal_populates",
+      "viewerInvite": "http://192.168.20.18:8787/viewer?room=7A1729",
+      "micInvite": "http://192.168.20.18:8787/mic?room=7A1729",
+      "qrSrc": "/api/room/7A1729/invite-qr.png?role=viewer"
+    },
+    {
+      "at": "2026-01-16T14:44:07.298Z",
+      "step": "qr_fetch_viewer",
+      "url": "http://localhost:8787/api/room/7A1729/invite-qr.png?role=viewer"
+    },
+    {
+      "at": "2026-01-16T14:44:07.349Z",
+      "step": "qr_fetch_mic",
+      "url": "http://localhost:8787/api/room/7A1729/invite-qr.png?role=mic"
+    },
+    {
+      "at": "2026-01-16T14:44:07.433Z",
+      "step": "qr_endpoints_ok"
+    },
+    {
+      "at": "2026-01-16T14:44:07.450Z",
+      "step": "topic_log_present"
+    },
+    {
+      "at": "2026-01-16T14:44:07.577Z",
+      "step": "topic_log_updates_live"
+    },
+    {
+      "at": "2026-01-16T14:44:07.998Z",
+      "step": "topic_summary_modal_opens"
+    },
+    {
+      "at": "2026-01-16T14:44:08.642Z",
+      "step": "open_mic",
+      "url": "http://localhost:8787/mic?room=7A1729"
+    },
+    {
+      "at": "2026-01-16T14:44:09.164Z",
+      "step": "assert_mic_visible_in_viewer"
+    }
+  ],
+  "screenshots": [
+    "/home/lucifer/projects/deaf/.chrome-e2e/01-host-room-created.png",
+    "/home/lucifer/projects/deaf/.chrome-e2e/02-viewer-opened.png",
+    "/home/lucifer/projects/deaf/.chrome-e2e/02c-viewer-mic-enabled.png",
+    "/home/lucifer/projects/deaf/.chrome-e2e/02a-invite-modal.png",
+    "/home/lucifer/projects/deaf/.chrome-e2e/02b-topic-log-updated.png",
+    "/home/lucifer/projects/deaf/.chrome-e2e/02d-topic-summary-modal.png",
+    "/home/lucifer/projects/deaf/.chrome-e2e/03-mic-opened.png",
+    "/home/lucifer/projects/deaf/.chrome-e2e/04-viewer-mic-visible.png"
+  ],
+  "console": [
+    {
+      "page": "host",
+      "type": "log",
+      "text": "WebSocket connected (viewer)"
+    },
+    {
+      "page": "host",
+      "type": "log",
+      "text": "Mic WebSocket connected (viewer→mic opt-in)"
+    },
+    {
+      "page": "host",
+      "type": "http404",
+      "text": "http://localhost:8787/api/room/7A1729/topic-summary?start=1768574647567&end=1768574647568"
+    },
+    {
+      "page": "host",
+      "type": "error",
+      "text": "Failed to load resource: the server responded with a status of 404 (Not Found)"
+    },
+    {
+      "page": "mic",
+      "type": "log",
+      "text": "WebSocket connected"
+    },
+    {
+      "page": "mic",
+      "type": "log",
+      "text": "WebSocket connected"
+    }
+  ],
+  "success": true,
+  "endedAt": "2026-01-16T14:44:09.478Z"
+}

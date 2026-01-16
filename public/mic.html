@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Huddle - Microphone</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/theme.css">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <!-- Mic Screen -->
+    <div id="micScreen" class="screen mic-screen-dark active">
+        <div class="topbar topbar-dark">
+            <div class="topbar-left">
+                <div class="room-pill room-pill-dark" title="Room code">
+                    <span class="room-pill-label">Room</span>
+                    <strong id="micRoomCode" class="room-pill-code"></strong>
+                </div>
+            </div>
+            <div class="topbar-right">
+                <button id="openRoomBtn" class="btn btn-secondary btn-small">Open Room</button>
+                <button id="leaveMicBtn" class="btn btn-secondary btn-small">Leave</button>
+            </div>
+        </div>
+
+        <!-- Status bar (truth indicators) - hidden by default, shown in debug mode -->
+        <div class="statusbar statusbar-hidden" id="micStatusBar">
+            <span class="status-item">
+                <span class="status-dot" id="micWsDot"></span>
+                <span class="status-label">WS</span>
+                <span class="status-value" id="micWsStatus">connecting…</span>
+            </span>
+            <span class="status-item">
+                <span class="status-label">Sent</span>
+                <span class="status-value" id="micSentStatus">0</span>
+            </span>
+            <span class="status-item">
+                <span class="status-label">Acked</span>
+                <span class="status-value" id="micAckStatus">0</span>
+            </span>
+            <span class="status-item">
+                <span class="status-label">Last ack</span>
+                <span class="status-value" id="micLastAck">—</span>
+            </span>
+            <span class="status-item status-item-warn" id="micWarnItem" style="display:none;">
+                <span class="status-label">Issue</span>
+                <span class="status-value" id="micWarnText"></span>
+            </span>
+        </div>
+
+        <div class="mic-content-wrapper">
+            <div class="mic-content">
+                <!-- HTTPS Warning -->
+                <div class="https-warning" id="httpsWarning" style="display: none;">
+                    <strong>HTTPS required on phones</strong>
+                    <p>Open the app via your Cloudflare Tunnel URL.</p>
+                </div>
+
+                <!-- Large Mic Icon with Visual States -->
+                <div class="mic-icon-container">
+                    <div class="mic-icon-wrapper" id="micIconWrapper">
+                        <svg class="mic-icon" id="micIcon" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+                            <!-- Outer circle (pulse ring) -->
+                            <circle class="mic-icon-ring" cx="100" cy="100" r="90" fill="none" stroke="currentColor" stroke-width="3" opacity="0.3"/>
+                            <!-- Middle circle (background) -->
+                            <circle class="mic-icon-bg" cx="100" cy="100" r="70" fill="currentColor" opacity="0.1"/>
+                            <!-- Mic body -->
+                            <rect class="mic-icon-body" x="75" y="40" width="50" height="80" rx="25" fill="currentColor"/>
+                            <!-- Mic stand -->
+                            <path class="mic-icon-stand" d="M 75 120 L 60 140 L 140 140 L 125 120 Z" fill="currentColor"/>
+                            <!-- Mic grille lines -->
+                            <line class="mic-icon-grille" x1="85" y1="60" x2="115" y2="60" stroke="currentColor" stroke-width="2" opacity="0.3"/>
+                            <line class="mic-icon-grille" x1="85" y1="80" x2="115" y2="80" stroke="currentColor" stroke-width="2" opacity="0.3"/>
+                            <line class="mic-icon-grille" x1="85" y1="100" x2="115" y2="100" stroke="currentColor" stroke-width="2" opacity="0.3"/>
+                        </svg>
+                        <!-- Status indicator dot -->
+                        <div class="mic-status-dot" id="micStatusDot"></div>
+                    </div>
+                    <!-- Visual feedback rings when recording -->
+                    <div class="mic-pulse-rings" id="micPulseRings"></div>
+                </div>
+
+                <!-- Status Card -->
+                <div class="card mic-status-card-dark">
+                    <div class="mic-status-large" id="micStatus">Ready to start</div>
+                    <div class="mic-name-large">You are: <strong id="micName"></strong></div>
+                    <div class="mic-room-status" id="micRoomStatus" style="margin-top: 12px; font-size: 14px; color: rgba(255,255,255,0.7);">
+                        <span id="micRoomStatusText">Connecting to room...</span>
+                    </div>
+                </div>
+
+                <!-- Consent Checkbox -->
+                <div class="consent-box-dark" id="consentBox">
+                    <label class="checkbox-label-dark">
+                        <input type="checkbox" id="consentCheckbox" required>
+                        <span>Everyone here knows captions are running</span>
+                    </label>
+                    <div class="consent-error" id="consentError" style="display: none;">
+                        Please confirm that everyone knows captions are running
+                    </div>
+                </div>
+
+                <!-- Main Action Buttons -->
+                <div class="mic-actions">
+                    <button id="startMicBtn" class="btn btn-mic-primary" disabled>
+                        <span class="btn-icon">🎤</span>
+                        <span>Start Mic</span>
+                    </button>
+                    <button id="stopMicBtn" class="btn btn-mic-danger" style="display: none;">
+                        <span class="btn-icon">⏹</span>
+                        <span>Stop Mic</span>
+                    </button>
+                </div>
+                
+                <!-- Mic Warning Banner -->
+                <div class="mic-warning-banner-dark" id="micWarningBanner" style="display: none;">
+                    <span class="warning-icon">⚠️</span>
+                    <span id="micWarningText">Mic is active but server isn't receiving audio. Check your connection.</span>
+                </div>
+
+                <!-- Live Indicator and Meter -->
+                <div class="mic-feedback" id="micFeedback" style="display: none;">
+                    <div class="mic-indicator-large" id="micIndicator">
+                        <span class="pulse-large"></span>
+                        <strong>Mic LIVE</strong>
+                    </div>
+                    <div class="mic-meter-container" id="micMeterRow">
+                        <label class="mic-meter-label">Mic level</label>
+                        <div class="mic-meter-wrapper">
+                            <progress id="micMeter" max="1" value="0" class="mic-meter-large"></progress>
+                            <span id="micMeterText" class="mic-meter-text-large">0%</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Info Text -->
+                <div class="mic-info-dark">
+                    <p>Your audio will be transcribed and shared with viewers.</p>
+                    <div class="mic-stats-dark" id="micStats" style="display: none;">
+                        <small>
+                            Sent: <span id="chunksSent">0</span>
+                            · Acked: <span id="micAckInline">0</span>
+                            · Last ack: <span id="micLastAckInline">—</span>
+                        </small>
+                    </div>
+                </div>
+
+                <!-- Transcript Display for Mic Screen -->
+                <div class="card mic-status-card-dark mic-transcript-card" id="micTranscriptCard" style="display: none; margin-top: 2rem;">
+                    <div class="card-header">
+                        <span>What's Being Said</span>
+                        <button id="micTranscriptToggle" class="btn btn-small btn-secondary" title="Show/hide transcript">Show</button>
+                    </div>
+                    <div class="mic-transcript-content mic-transcript-collapsed" id="micTranscriptContent">
+                        <div class="empty-state">Listening…</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/realtime_mic.js"></script>
+    <script src="/app.js"></script>
+</body>
+</html>
+
+
+

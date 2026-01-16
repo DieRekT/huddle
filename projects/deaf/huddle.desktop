@@ -1,0 +1,15 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Huddle
+GenericName=Room Captioning
+Comment=Real-time conversation transcription and summarization for deaf/HoH users
+Exec=/home/lucifer/projects/deaf/scripts/launch-app.sh
+Icon=/home/lucifer/projects/deaf/share/icons/hicolor/256x256/apps/huddle.png
+Terminal=false
+Categories=Utility;
+Keywords=deaf;hearing;captioning;transcription;accessibility;
+StartupNotify=true
+MimeType=
+Path=/home/lucifer/projects/deaf
+

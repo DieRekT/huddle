@@ -1,0 +1,5 @@
+Chrome E2E: PASS
+Base: http://localhost:8787
+Room: 7A1729
+Viewer: http://localhost:8787/viewer?room=7A1729
+Artifacts: /home/lucifer/projects/deaf/.chrome-e2e

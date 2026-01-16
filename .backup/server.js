@@ -1,0 +1,1815 @@
+import express from 'express';
+import { WebSocketServer } from 'ws';
+import { createServer } from 'http';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import dotenv from 'dotenv';
+import cors from 'cors';
+import OpenAI from 'openai';
+import { randomBytes } from 'crypto';
+import fs from 'fs/promises';
+import { createReadStream } from 'fs';
+import { convertToWav16kMono } from './audio_convert.js';
+import QRCode from 'qrcode';
+import os from 'os';
+
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const app = express();
+const server = createServer(app);
+const wss = new WebSocketServer({ server });
+
+app.use(cors());
+app.use(express.json({ limit: '1mb' }));
+
+// Route handlers (must be before static middleware)
+app.get('/host', (req, res) => {
+  res.sendFile(join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/viewer', (req, res) => {
+  res.sendFile(join(__dirname, 'public', 'index.html'));
+});
+
+app.get('/mic', (req, res) => {
+  res.sendFile(join(__dirname, 'public', 'index.html'));
+});
+
+app.use(express.static(join(__dirname, 'public')));
+
+// Configuration
+const PORT = process.env.PORT || 8787;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL || 'whisper-1'; // Upgraded to whisper-1 for better accuracy
+const TRANSCRIBE_TEMPERATURE = parseFloat(process.env.TRANSCRIBE_TEMPERATURE || '0.0'); // Lower = more accurate, deterministic
+const SUMMARY_INTERVAL_SEC = parseInt(process.env.SUMMARY_INTERVAL_SEC || '10');
+const SUMMARY_LOOKBACK_SEC = parseInt(process.env.SUMMARY_LOOKBACK_SEC || '120');
+const ROOM_TTL_MS = parseInt(process.env.ROOM_TTL_MS || '7200000'); // 2 hours
+const MAX_CHUNK_SIZE = parseInt(process.env.MAX_CHUNK_SIZE_BYTES || '220000');
+const TOPIC_SHIFT_CONFIDENCE = parseFloat(process.env.TOPIC_SHIFT_CONFIDENCE_THRESHOLD || '0.60');
+const TOPIC_SHIFT_DURATION = parseInt(process.env.TOPIC_SHIFT_DURATION_SEC || '8');
+const TRANSCRIBE_RETRY_ATTEMPTS = parseInt(process.env.TRANSCRIBE_RETRY_ATTEMPTS || '3');
+const TRANSCRIBE_CONTEXT_WORDS = parseInt(process.env.TRANSCRIBE_CONTEXT_WORDS || '50'); // Words of context to send (legacy; prompt stitching is char-capped)
+const PROMPT_CONTEXT_MAX_CHARS = parseInt(process.env.PROMPT_CONTEXT_MAX_CHARS || '900'); // rolling per-mic context stored server-side
+const TRANSCRIBE_PROMPT_MAX_CHARS = parseInt(process.env.TRANSCRIBE_PROMPT_MAX_CHARS || '1400'); // max prompt size passed to OpenAI
+const MIN_WAV_SEC = parseFloat(process.env.MIN_WAV_SEC || '0.9'); // skip tiny windows (helps accuracy, reduces spam)
+// RMS gate: prefer RMS_MIN, but keep MIN_WAV_RMS for backward compatibility
+const MIN_WAV_RMS = parseFloat(process.env.RMS_MIN || process.env.MIN_WAV_RMS || '0.012'); // skip near-silence windows (reduces [inaudible] spam)
+const AUDIO_WARN_COOLDOWN_MS = parseInt(process.env.AUDIO_WARN_COOLDOWN_MS || '4000');
+const ALLOW_DIRECT_TRANSCRIBE_FALLBACK = process.env.ALLOW_DIRECT_TRANSCRIBE_FALLBACK === '1';
+const DEBUG_DUMP_WAV = process.env.DEBUG_DUMP_WAV === '1';
+const DEBUG_DUMP_WAV_PATH = process.env.DEBUG_DUMP_WAV_PATH || '/tmp/huddle_debug.wav';
+const DEBUG_DUMP_WAV_COOLDOWN_MS = parseInt(process.env.DEBUG_DUMP_WAV_COOLDOWN_MS || '10000');
+
+let lastDebugDumpAt = 0;
+
+function extractWavDataChunk(wavBuffer) {
+  try {
+    if (!Buffer.isBuffer(wavBuffer) || wavBuffer.length < 44) return null;
+    if (wavBuffer.toString('ascii', 0, 4) !== 'RIFF') return null;
+    if (wavBuffer.toString('ascii', 8, 12) !== 'WAVE') return null;
+
+    // Walk chunks: [4-byte id][4-byte size][data...]
+    let off = 12;
+    while (off + 8 <= wavBuffer.length) {
+      const id = wavBuffer.toString('ascii', off, off + 4);
+      const size = wavBuffer.readUInt32LE(off + 4);
+      const dataOff = off + 8;
+      const dataEnd = Math.min(wavBuffer.length, dataOff + size);
+      if (id === 'data') return wavBuffer.slice(dataOff, dataEnd);
+      off = dataOff + size;
+      // word align
+      if (off % 2 === 1) off += 1;
+    }
+  } catch {}
+  return null;
+}
+
+function wavDurationSeconds16kMonoPcm16le(wavBuffer) {
+  const data = extractWavDataChunk(wavBuffer);
+  if (!data) return null;
+  // 16k * 1ch * 16-bit => 32000 bytes/sec
+  return data.length / 32000;
+}
+
+function wavRms16leNormalized(wavBuffer) {
+  const data = extractWavDataChunk(wavBuffer);
+  if (!data || data.length < 2) return null;
+  // Sample sparsely for speed
+  const stepBytes = 8; // every 4 samples
+  let sumSq = 0;
+  let n = 0;
+  for (let i = 0; i + 1 < data.length; i += stepBytes) {
+    const s = data.readInt16LE(i);
+    const x = s / 32768;
+    sumSq += x * x;
+    n += 1;
+  }
+  if (n === 0) return null;
+  return Math.sqrt(sumSq / n);
+}
+
+function isGarbageTranscript(text) {
+  const t = String(text || '').trim();
+  if (!t) return true;
+
+  // Pure inaudible spam
+  if (/^\[inaudible\]$/i.test(t)) return true;
+  if (/^(\[inaudible\]\s*){2,}$/i.test(t)) return true;
+
+  // Mostly punctuation / filler (e.g. ",m,,,")
+  const alphaNum = (t.match(/[A-Za-z0-9]/g) || []).length;
+  if (alphaNum === 0) return true;
+  if (alphaNum === 1 && /[,.\s'"-]*[A-Za-z0-9][,.\s'"-]*/.test(t)) return true;
+
+  return false;
+}
+
+function normalizeText(s) {
+  return String(s || '').replace(/\s+/g, ' ').trim();
+}
+
+function similarTranscript(a, b) {
+  if (!a || !b) return false;
+  const x = normalizeText(a.text).toLowerCase();
+  const y = normalizeText(b.text).toLowerCase();
+  if (!x || !y) return false;
+  if (x === y) return true;
+  // Avoid over-aggressive merging on very short utterances (e.g., "yes", "ok")
+  if (x.length < 12 || y.length < 12) return false;
+  return x.includes(y) || y.includes(x);
+}
+
+function buildMicPrompt(priorTranscript) {
+  const prefix =
+    'Australian English. Output only English. Add normal punctuation. Continue the transcript naturally.\n\n';
+  const suffix = '\nNew audio:';
+  const prior = normalizeText(priorTranscript);
+  if (!prior) return `${prefix}New audio:`;
+
+  const priorLabel = 'Prior transcript:\n';
+  const extra = prefix.length + priorLabel.length + '\n\n'.length + suffix.length;
+  const maxPrior = Math.max(0, TRANSCRIBE_PROMPT_MAX_CHARS - extra);
+  const clippedPrior = prior.length > maxPrior ? prior.slice(-maxPrior) : prior;
+  return `${prefix}${priorLabel}${clippedPrior}\n\nNew audio:`;
+}
+
+function isMostlyPunctuation(s) {
+  const t = normalizeText(s);
+  if (!t) return true;
+  const letters = (t.match(/[A-Za-z]/g) || []).length;
+  const punct = (t.match(/[^A-Za-z0-9\s]/g) || []).length;
+  return letters < 3 || punct > letters * 2;
+}
+
+function looksEnglishEnough(s) {
+  const t = normalizeText(s);
+  if (!t) return false;
+  // Allow very short common English responses
+  const low = t.toLowerCase();
+  if (low === 'ok' || low === 'okay' || low === 'yes' || low === 'no' || low === 'yeah' || low === 'yep') return true;
+  if (isMostlyPunctuation(t)) return false;
+
+  const letters = (t.match(/[A-Za-z]/g) || []).length;
+  const vowels = (t.match(/[aeiouAEIOU]/g) || []).length;
+  const words = t.split(' ').filter(Boolean);
+
+  if (words.length === 1 && words[0].length <= 3) return false;
+  if (letters < 8) return false;
+  if (vowels < Math.max(2, Math.floor(letters * 0.15))) return false;
+
+  return true;
+}
+
+function maybeBroadcastAudioWarning(room, { key, speaker, reason, rms, dur, message }) {
+  if (!room) return;
+  if (!room._audioWarnCooldown) room._audioWarnCooldown = new Map();
+
+  const k = `${key || 'unknown'}:${reason || 'unknown'}`;
+  const now = Date.now();
+  const last = room._audioWarnCooldown.get(k) || 0;
+  if (now - last < AUDIO_WARN_COOLDOWN_MS) return;
+  room._audioWarnCooldown.set(k, now);
+
+  room.broadcast({
+    type: 'audio_warning',
+    micId: key || null,
+    speaker: speaker || null,
+    reason: reason || 'unknown',
+    rms: typeof rms === 'number' ? rms : null,
+    dur: typeof dur === 'number' ? dur : null,
+    message: message || 'Audio quality issue detected. Move the mic closer or check the input device.'
+  });
+}
+
+// Heuristic: detect likely non-English / gibberish output (common with low-SNR audio).
+// We keep this lightweight to avoid extra dependencies.
+const COMMON_EN_WORDS = new Set([
+  'a','about','after','again','all','also','am','an','and','any','are','as','at','back','be','because','been','before',
+  'being','but','by','can','come','could','day','did','do','does','doing','down','each','even','every','few','for',
+  'from','get','go','going','good','got','had','has','have','having','he','her','here','hey','him','his','how','i',
+  'if','in','into','is','it','its','just','know','like','little','look','make','me','more','most','my','need','new',
+  'no','not','now','of','off','ok','okay','on','one','or','our','out','over','people','please','right','said','say',
+  'see','she','so','some','something','still','take','talk','than','that','the','their','them','then','there','these',
+  'they','thing','think','this','those','time','to','today','too','up','us','very','want','was','we','well','were',
+  'what','when','where','who','why','will','with','would','yeah','yes','you','your'
+]);
+
+function englishScore(text) {
+  const t = String(text || '').toLowerCase();
+  const tokens = (t.match(/[a-z']+/g) || []).filter(Boolean);
+  if (tokens.length === 0) return 0;
+  let common = 0;
+  for (const tok of tokens) {
+    if (COMMON_EN_WORDS.has(tok)) common += 1;
+  }
+  return common / tokens.length; // 0..1
+}
+
+function shouldRetryWithWhisper(model, text, opts = {}) {
+  if (!opts.audioOk) return false;
+  const m = String(model || '').toLowerCase();
+  if (m.includes('whisper')) return false;
+  const t = String(text || '').trim();
+  if (!t) return true;
+  // Short single-word outputs are often “guesses”; only retry when they look non-English.
+  const tokenCount = (t.match(/[A-Za-z']+/g) || []).length;
+  const score = englishScore(t);
+  if (tokenCount <= 2) return score < 0.25;
+  return score < 0.35;
+}
+
+// Constants (replacing magic numbers)
+const MAX_TRANSCRIPTS = parseInt(process.env.MAX_TRANSCRIPTS || '1000');
+const RECENT_TRANSCRIPTS_SENT = parseInt(process.env.RECENT_TRANSCRIPTS_SENT || '50');
+const CONTEXT_ENTRIES = parseInt(process.env.CONTEXT_ENTRIES || '5');
+const TRANSCRIPT_MERGE_WINDOW_MS = parseInt(process.env.TRANSCRIPT_MERGE_WINDOW_MS || '5000');
+const TRANSCRIPT_MAX_AGE_MS = parseInt(process.env.TRANSCRIPT_MAX_AGE_MS || '7200000'); // 2 hours
+const RATE_LIMIT_CHUNKS_PER_MINUTE = parseInt(process.env.RATE_LIMIT_CHUNKS_PER_MINUTE || '100');
+const API_TIMEOUT_MS = parseInt(process.env.API_TIMEOUT_MS || '30000'); // 30 seconds
+const MAX_RECONNECT_ATTEMPTS = parseInt(process.env.MAX_RECONNECT_ATTEMPTS || '5');
+const TEMP_FILE_MAX_AGE_MS = parseInt(process.env.TEMP_FILE_MAX_AGE_MS || '3600000'); // 1 hour
+const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
+
+// Logger with levels
+const logger = {
+  debug: (...args) => LOG_LEVEL === 'debug' && console.log('[DEBUG]', ...args),
+  info: (...args) => ['debug', 'info'].includes(LOG_LEVEL) && console.log('[INFO]', ...args),
+  warn: (...args) => ['debug', 'info', 'warn'].includes(LOG_LEVEL) && console.warn('[WARN]', ...args),
+  error: (...args) => console.error('[ERROR]', ...args)
+};
+
+// Utility functions
+function sanitizeName(name) {
+  if (!name || typeof name !== 'string') return 'Unknown';
+  // Remove control characters, limit length
+  const cleaned = name
+    .trim()
+    .replace(/[\x00-\x1F\x7F]/g, '')
+    .replace(/\s+/g, ' ')
+    .substring(0, 50);
+  // If the name is basically punctuation or a single character, it's probably corrupted/accidental input.
+  const alphaNumCount = (cleaned.match(/[A-Za-z0-9]/g) || []).length;
+  if (alphaNumCount < 2) return 'Mic';
+  return cleaned;
+}
+
+// Multi-location architecture: Detect device type for better mic naming
+function detectDeviceType(userAgent) {
+  if (!userAgent || typeof userAgent !== 'string') return 'Mic';
+  const ua = userAgent.toLowerCase();
+  
+  // Mobile devices
+  if (/iphone/.test(ua)) return 'Phone';
+  if (/ipad/.test(ua)) return 'iPad';
+  if (/android.*mobile/.test(ua)) return 'Phone';
+  if (/android/.test(ua)) return 'Tablet';
+  
+  // Desktop
+  if (/macintosh|mac os x/.test(ua)) return 'Laptop';
+  if (/windows/.test(ua)) return 'PC';
+  if (/linux/.test(ua)) return 'Laptop';
+  
+  return 'Mic';
+}
+
+function validateRoomCode(code) {
+  return /^[A-F0-9]{6}$/.test(code);
+}
+
+// Timeout wrapper for API calls
+async function withTimeout(promise, timeoutMs, errorMessage) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => 
+      setTimeout(() => reject(new Error(errorMessage)), timeoutMs)
+    )
+  ]);
+}
+
+// Clamping functions
+function clampSummary(text, maxLength = 200) {
+  if (!text) return '';
+  if (text.length <= maxLength) return text;
+  // Try to cut at sentence boundary
+  const cut = text.substring(0, maxLength);
+  const lastPeriod = cut.lastIndexOf('.');
+  const lastSpace = cut.lastIndexOf(' ');
+  const cutPoint = lastPeriod > maxLength * 0.7 ? lastPeriod + 1 : lastSpace;
+  return cut.substring(0, cutPoint > 0 ? cutPoint : maxLength) + '...';
+}
+
+function clampArray(arr, maxLength = 5) {
+  return Array.isArray(arr) ? arr.slice(0, maxLength) : [];
+}
+
+if (!OPENAI_API_KEY) {
+  console.error('ERROR: OPENAI_API_KEY is required. Set it in .env file.');
+  process.exit(1);
+}
+
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
+function getLanIp() {
+  try {
+    const nets = os.networkInterfaces();
+    for (const name of Object.keys(nets)) {
+      for (const net of nets[name] || []) {
+        // Prefer IPv4 private LAN addresses
+        if (net && net.family === 'IPv4' && !net.internal) {
+          return net.address;
+        }
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function getPublicBaseUrl(req) {
+  const configured = String(process.env.PUBLIC_BASE_URL || '').trim();
+  if (configured) return configured.replace(/\/+$/, '');
+
+  // Best-effort: respect common reverse-proxy headers (Cloudflare Tunnel sets these).
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+  const host = String(req.headers['x-forwarded-host'] || req.get('host') || '').split(',')[0].trim();
+  if (!host) return '';
+  return `${proto}://${host}`.replace(/\/+$/, '');
+}
+
+// Ensure temp directory exists
+const TMP_DIR = join(__dirname, '.tmp');
+await fs.mkdir(TMP_DIR, { recursive: true });
+
+// Room state management
+const rooms = new Map(); // roomCode -> Room
+
+class Room {
+  constructor(code) {
+    this.code = code;
+    this.createdAt = Date.now();
+    this.updatedAt = Date.now();
+    this.clients = new Map(); // clientId -> { role, name, ws, micId }
+    this.transcripts = []; // bounded array
+    this.summary = {
+      topic: '',
+      subtopic: '',
+      status: 'Deciding',
+      rolling_summary: '',
+      decisions: [],
+      next_steps: [],
+      confidence: 0.5,
+      lastUpdated: 0,
+      topicStability: {
+        pendingTopic: null,
+        pendingCount: 0
+      }
+    };
+    this.adminToken = randomBytes(16).toString('hex'); // For room deletion
+    this.audioQueue = [];
+    this.audioBusy = false;
+    this.summaryBusy = false;
+    this.summaryPending = false; // Flag to retry summary after busy
+    this.summaryTimer = null;
+    this.clientChunkRates = new Map(); // clientId -> { count, resetAt }
+    this.speakerContexts = new Map(); // speaker -> { text, lastUpdated }
+    this.promptByMic = new Map(); // micKey (clientId) -> rolling transcript context
+    // Multi-location architecture: track active mics
+    this.activeMics = new Map(); // micId -> { clientId, name, status, lastActivity, connectedAt }
+    this.micHealthTimer = null; // Timer to update mic health status
+  }
+
+  addClient(clientId, role, name, ws, micId = null) {
+    const micIdFinal = micId || clientId; // Use provided micId or fallback to clientId
+    this.clients.set(clientId, {
+      role,
+      name,
+      ws,
+      micId: micIdFinal,
+      joinedAt: Date.now(),
+      lastSeen: Date.now(),
+      // Fragment caches for browsers that send non-standalone chunks
+      webmHeader: null, // Buffer (EBML header prefix)
+      mp4Init: null // Buffer (ftyp+moov)
+    });
+    
+    // Track mic node for multi-location architecture
+    if (role === 'mic') {
+      this.activeMics.set(micIdFinal, {
+        clientId,
+        name: sanitizeName(name),
+        status: 'connected', // connected, quiet, disconnected
+        lastActivity: Date.now(),
+        connectedAt: Date.now(),
+        lastTranscript: null
+      });
+      this.broadcastMicHealth();
+    }
+    
+    this.updatedAt = Date.now();
+  }
+
+  removeClient(clientId) {
+    const client = this.clients.get(clientId);
+    if (client && client.role === 'mic' && client.micId) {
+      // Update mic status to disconnected
+      const micState = this.activeMics.get(client.micId);
+      if (micState) {
+        micState.status = 'disconnected';
+        micState.lastActivity = Date.now();
+        // Remove after a short delay (in case of reconnect)
+        setTimeout(() => {
+          if (this.activeMics.get(client.micId)?.status === 'disconnected') {
+            this.activeMics.delete(client.micId);
+            this.broadcastMicHealth();
+          }
+        }, 5000);
+      }
+    }
+    this.clients.delete(clientId);
+    this.updatedAt = Date.now();
+    this.broadcastMicHealth();
+  }
+
+  addTranscript(entry) {
+    const curTs = Number(entry.ts || 0) || Date.now();
+    entry.ts = curTs;
+    const curText = String(entry.text || '').trim();
+    entry.text = entry.text ?? '';
+
+    // Insert transcripts in timestamp order (multi-mic processing can complete out-of-order).
+    // Keep stable ordering for equal timestamps by inserting after existing equal-ts items.
+    let insertIdx = this.transcripts.length;
+    if (this.transcripts.length > 0) {
+      const last = this.transcripts[this.transcripts.length - 1];
+      const lastTs = Number(last.ts || 0);
+      if (Number.isFinite(lastTs) && curTs < lastTs) {
+        let lo = 0;
+        let hi = this.transcripts.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          const ts = Number(this.transcripts[mid]?.ts || 0);
+          if (ts <= curTs) lo = mid + 1;
+          else hi = mid;
+        }
+        insertIdx = lo;
+      }
+    }
+
+    // De-dupe identical adjacent transcripts from the same speaker within a short window
+    const prev = insertIdx > 0 ? this.transcripts[insertIdx - 1] : null;
+    const next = insertIdx < this.transcripts.length ? this.transcripts[insertIdx] : null;
+    for (const neighbor of [prev, next]) {
+      if (!neighbor) continue;
+      const sameSpeaker = neighbor.speaker === entry.speaker;
+      const sameText = String(neighbor.text || '').trim() === curText;
+      const neighborTs = Number(neighbor.ts || 0);
+      if (sameSpeaker && sameText && neighborTs && curTs && Math.abs(curTs - neighborTs) <= TRANSCRIPT_MERGE_WINDOW_MS) {
+        return false;
+      }
+    }
+
+    // Stronger repeat suppression: if the same speaker repeats the exact same line many times,
+    // drop it (common in low-quality audio or fragmented streams).
+    if (curText) {
+      const nowTs = curTs;
+      let recentSame = 0;
+      // Scan last ~12 entries (cheap), count exact repeats within 30s.
+      for (let i = this.transcripts.length - 1; i >= 0 && i >= this.transcripts.length - 12; i--) {
+        const t = this.transcripts[i];
+        const ts = Number(t.ts || 0);
+        if (nowTs - ts > 30000) break;
+        if (t.speaker === entry.speaker && String(t.text || '').trim() === curText) {
+          recentSame += 1;
+          if (recentSame >= 2) return false; // already seen 2x recently → suppress spam
+        }
+      }
+    }
+
+    let insertedIndex = insertIdx;
+    if (insertIdx === this.transcripts.length) {
+      this.transcripts.push(entry);
+      insertedIndex = this.transcripts.length - 1;
+    } else {
+      this.transcripts.splice(insertIdx, 0, entry);
+    }
+
+    // Cross-mic neighbor de-dupe: if two mics capture the same phrase in a short window,
+    // drop one copy to avoid double-lines.
+    const prev2 = insertedIndex > 0 ? this.transcripts[insertedIndex - 1] : null;
+    const next2 = insertedIndex + 1 < this.transcripts.length ? this.transcripts[insertedIndex + 1] : null;
+    if (prev2) {
+      const prevTs = Number(prev2.ts || 0);
+      if (prevTs && curTs && Math.abs(curTs - prevTs) <= TRANSCRIPT_MERGE_WINDOW_MS && similarTranscript(prev2, entry)) {
+        this.transcripts.splice(insertedIndex, 1);
+        this.updatedAt = Date.now();
+        return false;
+      }
+    }
+    if (next2) {
+      const nextTs = Number(next2.ts || 0);
+      if (nextTs && curTs && Math.abs(curTs - nextTs) <= TRANSCRIPT_MERGE_WINDOW_MS && similarTranscript(entry, next2)) {
+        this.transcripts.splice(insertedIndex + 1, 1);
+      }
+    }
+
+    // Keep only last MAX_TRANSCRIPTS entries
+    if (this.transcripts.length > MAX_TRANSCRIPTS) {
+      this.transcripts.shift();
+    }
+    
+    // Also remove entries older than TRANSCRIPT_MAX_AGE_MS
+    const cutoff = Date.now() - TRANSCRIPT_MAX_AGE_MS;
+    this.transcripts = this.transcripts.filter(t => t.ts >= cutoff);
+    
+    this.updatedAt = Date.now();
+    return true;
+  }
+
+  getRecentTranscripts(seconds) {
+    const cutoff = Date.now() - (seconds * 1000);
+    
+    // Optimization: check if we can skip filtering
+    if (this.transcripts.length === 0) return [];
+    if (this.transcripts[0].ts >= cutoff) return this.transcripts;
+    
+    // Only filter if necessary
+    return this.transcripts.filter(t => t.ts >= cutoff);
+  }
+
+  broadcast(message, excludeClientId = null) {
+    const payload = JSON.stringify(message);
+    for (const [clientId, client] of this.clients) {
+      if (clientId !== excludeClientId && client.ws.readyState === 1) {
+        client.ws.send(payload);
+      }
+    }
+  }
+
+  // Multi-location architecture: get mic roster with health status
+  getMicRoster() {
+    const roster = [];
+    const now = Date.now();
+    const QUIET_THRESHOLD_MS = 30000; // 30 seconds without activity = quiet
+    
+    for (const [micId, micState] of this.activeMics.entries()) {
+      if (micState.status === 'disconnected') continue;
+      
+      // Determine current status
+      let status = micState.status;
+      const timeSinceActivity = now - micState.lastActivity;
+      if (status === 'connected' && timeSinceActivity > QUIET_THRESHOLD_MS) {
+        status = 'quiet';
+      }
+      
+      roster.push({
+        micId,
+        name: micState.name,
+        status, // connected, quiet, disconnected
+        lastActivity: micState.lastActivity,
+        connectedAt: micState.connectedAt
+      });
+    }
+    
+    return roster;
+  }
+
+  // Update mic activity timestamp
+  updateMicActivity(micId, hasTranscript = false) {
+    const micState = this.activeMics.get(micId);
+    if (micState) {
+      micState.lastActivity = Date.now();
+      if (hasTranscript) {
+        micState.lastTranscript = Date.now();
+        if (micState.status === 'quiet') {
+          micState.status = 'connected';
+        }
+      }
+    }
+  }
+
+  // Broadcast mic health updates to viewers
+  broadcastMicHealth() {
+    const roster = this.getMicRoster();
+    this.broadcast({
+      type: 'state',
+      room: {
+        code: this.code,
+        summary: this.summary,
+        micRoster: roster
+      }
+    });
+  }
+}
+
+function generateRoomCode() {
+  let code;
+  let attempts = 0;
+  do {
+    code = randomBytes(3).toString('hex').toUpperCase();
+    attempts++;
+    if (attempts > 10) {
+      throw new Error('Failed to generate unique room code');
+    }
+  } while (rooms.has(code));
+  return code;
+}
+
+function generateClientId() {
+  return randomBytes(8).toString('hex');
+}
+
+// Cleanup old rooms
+setInterval(() => {
+  const now = Date.now();
+  for (const [code, room] of rooms.entries()) {
+    if (now - room.updatedAt > ROOM_TTL_MS) {
+      logger.info(`Cleaning up expired room: ${code}`);
+      if (room.summaryTimer) clearInterval(room.summaryTimer);
+      rooms.delete(code);
+    }
+  }
+}, 60000); // Check every minute
+
+// Cleanup temp files on startup and periodically
+async function cleanupTempFiles() {
+  try {
+    const files = await fs.readdir(TMP_DIR);
+    const now = Date.now();
+    
+    for (const file of files) {
+      const filePath = join(TMP_DIR, file);
+      try {
+        const stats = await fs.stat(filePath);
+        
+        if (now - stats.mtimeMs > TEMP_FILE_MAX_AGE_MS) {
+          await fs.unlink(filePath).catch(() => {});
+          logger.debug(`Cleaned up old temp file: ${file}`);
+        }
+      } catch (error) {
+        // File might have been deleted already, ignore
+      }
+    }
+  } catch (error) {
+    logger.error('Temp file cleanup error:', error.message);
+  }
+}
+
+// Run cleanup on startup and periodically
+cleanupTempFiles();
+setInterval(cleanupTempFiles, TEMP_FILE_MAX_AGE_MS);
+
+// Transcription function with retry logic and context
+async function transcribeAudio(audioBuffer, ext = 'webm', contextText = '', opts = {}) {
+  const tempFile = join(TMP_DIR, `chunk_${Date.now()}_${randomBytes(4).toString('hex')}.${ext}`);
+  
+  // Prompt stitching: for Whisper, we can pass a prompt to improve continuity between chunks.
+  // IMPORTANT: Some non-Whisper models can echo the prompt back in the output, so only attach for Whisper.
+  const isWhisperModel = String(TRANSCRIBE_MODEL || '').toLowerCase().includes('whisper');
+  let prompt = '';
+  if (contextText) {
+    const p = String(contextText || '').trim();
+    // Keep within max size; prompt builder should already cap, but guard anyway.
+    prompt = p.length > TRANSCRIBE_PROMPT_MAX_CHARS ? p.slice(0, TRANSCRIBE_PROMPT_MAX_CHARS) : p;
+  }
+  
+  let lastError = null;
+  for (let attempt = 1; attempt <= TRANSCRIBE_RETRY_ATTEMPTS; attempt++) {
+    try {
+      await fs.writeFile(tempFile, audioBuffer);
+      
+      const buildParams = (modelName) => {
+        const p = {
+          file: createReadStream(tempFile),
+          model: modelName,
+          language: 'en',
+          response_format: 'text',
+          temperature: TRANSCRIBE_TEMPERATURE
+        };
+        // Add prompt only for whisper models
+        if (String(modelName || '').toLowerCase().includes('whisper') && prompt && prompt.trim()) {
+          p.prompt = prompt;
+        }
+        return p;
+      };
+      
+      const transcription = await withTimeout(
+        openai.audio.transcriptions.create(buildParams(TRANSCRIBE_MODEL)),
+        API_TIMEOUT_MS,
+        'Transcription request timed out'
+      );
+      
+      await fs.unlink(tempFile).catch(() => {});
+      
+      let result = transcription.trim();
+      // Safety: strip any accidental prompt echo from older runs.
+      result = result.replace(/transcribe this english conversation verbatim\.?/ig, '').trim();
+
+      // If the model output looks non-English/gibberish, retry once with whisper-1 to enforce English-only.
+      if (result && shouldRetryWithWhisper(TRANSCRIBE_MODEL, result, opts)) {
+        try {
+          const retry = await withTimeout(
+            openai.audio.transcriptions.create(buildParams('whisper-1')),
+            API_TIMEOUT_MS,
+            'Whisper retry timed out'
+          );
+          const retryText = String(retry || '').trim();
+          const cleanedRetry = retryText.replace(/transcribe this english conversation verbatim\.?/ig, '').trim();
+          if (cleanedRetry) {
+            // Prefer the one that scores as more English (or is non-garbage).
+            const a = englishScore(result);
+            const b = englishScore(cleanedRetry);
+            if (!isGarbageTranscript(cleanedRetry) && (b >= a + 0.10 || isGarbageTranscript(result))) {
+              const finalRetry = normalizeText(cleanedRetry);
+              if (finalRetry && !isGarbageTranscript(finalRetry) && looksEnglishEnough(finalRetry)) return finalRetry;
+            }
+          }
+        } catch (e) {
+          // Ignore retry failure; fall back to original.
+        }
+      }
+
+      const final = normalizeText(result);
+      if (!final) return '';
+      if (isGarbageTranscript(final)) return '';
+      // Extra guard: if audio is known-good but text still looks like nonsense, drop it.
+      if (opts.audioOk && !looksEnglishEnough(final) && englishScore(final) < 0.25) return '';
+      return final;
+      
+      // Empty result, retry
+      if (attempt < TRANSCRIBE_RETRY_ATTEMPTS) {
+        console.warn(`Empty transcription result, retrying (attempt ${attempt}/${TRANSCRIBE_RETRY_ATTEMPTS})`);
+        await new Promise(resolve => setTimeout(resolve, attempt * 200)); // Exponential backoff
+      }
+    } catch (error) {
+      lastError = error;
+      console.error(`Transcription error (ext: ${ext}, attempt ${attempt}/${TRANSCRIBE_RETRY_ATTEMPTS}):`, error.message);
+      
+      // Don't retry on certain errors (auth, invalid file, etc.)
+      if (error.status === 401 || error.status === 400) {
+        await fs.unlink(tempFile).catch(() => {});
+        throw error;
+      }
+      
+      // Retry with exponential backoff
+      if (attempt < TRANSCRIBE_RETRY_ATTEMPTS) {
+        const delay = Math.min(attempt * 500, 2000); // Max 2s delay
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+  
+  // Cleanup and throw last error
+  await fs.unlink(tempFile).catch(() => {});
+  throw lastError || new Error('Transcription failed after retries');
+}
+
+// Summarization function
+async function updateSummary(room) {
+  if (room.summaryBusy) {
+    room.summaryPending = true; // Mark as pending for retry
+    return;
+  }
+  
+  room.summaryBusy = true;
+  room.summaryPending = false;
+
+  try {
+    const recentTranscripts = room.getRecentTranscripts(SUMMARY_LOOKBACK_SEC);
+    if (recentTranscripts.length === 0) {
+      return; // Will be handled in finally block
+    }
+
+    const transcriptText = recentTranscripts
+      .map(t => `${t.speaker}: ${t.text}`)
+      .join('\n');
+
+    const previousSummary = room.summary.rolling_summary || 'No previous summary.';
+    const previousTopic = room.summary.topic || 'No topic yet.';
+
+    const prompt = `You are analyzing a live conversation transcript. Extract and update ONLY what is explicitly stated in the transcript below.
+
+CRITICAL RULES:
+- ONLY use information that appears in the transcript text below
+- NEVER invent, assume, or infer details not explicitly stated
+- If the transcript is sparse or unclear, reflect that accurately
+- If there's no clear topic, use "Waiting for conversation" or "General discussion"
+- If no decisions or next steps are mentioned, use empty arrays []
+
+Previous topic: ${previousTopic}
+Previous summary: ${previousSummary}
+
+Recent transcript (ONLY use content from here):
+${transcriptText}
+
+Extract:
+1. Current topic (one short phrase, or "Waiting for conversation" if unclear)
+2. Subtopic (more specific, or empty string if none)
+3. Status: "Deciding", "Confirming", or "Done" (based on what's actually stated)
+4. A rolling summary (1-2 sentences MAX, max 200 chars) - ONLY summarize what's in the transcript
+5. Decisions made (list ONLY what is explicitly stated, max 5)
+6. Next steps (list ONLY what is explicitly stated, max 5)
+7. Confidence (0.0 to 1.0) based on transcript clarity
+
+Respond in JSON format:
+{
+  "topic": "string",
+  "subtopic": "string",
+  "status": "Deciding|Confirming|Done",
+  "rolling_summary": "1-2 sentences, max 200 chars",
+  "decisions": ["string"],
+  "next_steps": ["string"],
+  "confidence": 0.0-1.0
+}`;
+
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.3,
+      response_format: { type: 'json_object' }
+    });
+
+    const result = JSON.parse(completion.choices[0].message.content);
+    
+    // Apply length clamping
+    const clampedSummary = clampSummary(result.rolling_summary || '', 200);
+    const clampedDecisions = clampArray(result.decisions || [], 5);
+    const clampedNextSteps = clampArray(result.next_steps || [], 5);
+    
+    // Topic stability logic: require confidence >= 0.60 AND persist for 2 updates
+    const newTopic = result.topic || room.summary.topic;
+    const newConfidence = result.confidence || 0.5;
+    const topicChanged = newTopic !== room.summary.topic && newConfidence >= TOPIC_SHIFT_CONFIDENCE;
+    
+    let finalTopic = room.summary.topic;
+    let topicShiftDetected = false;
+    
+    if (topicChanged) {
+      // Check if this topic has been pending
+      if (room.summary.topicStability.pendingTopic === newTopic) {
+        room.summary.topicStability.pendingCount++;
+        if (room.summary.topicStability.pendingCount >= 2) {
+          // Topic is stable, accept it
+          finalTopic = newTopic;
+          topicShiftDetected = true;
+          room.summary.topicStability.pendingTopic = null;
+          room.summary.topicStability.pendingCount = 0;
+        }
+      } else {
+        // New pending topic
+        room.summary.topicStability.pendingTopic = newTopic;
+        room.summary.topicStability.pendingCount = 1;
+      }
+    } else {
+      // Topic unchanged, reset pending
+      room.summary.topicStability.pendingTopic = null;
+      room.summary.topicStability.pendingCount = 0;
+    }
+    
+    room.summary = {
+      topic: finalTopic,
+      subtopic: result.subtopic || '',
+      status: result.status || 'Deciding',
+      rolling_summary: clampedSummary,
+      decisions: clampedDecisions,
+      next_steps: clampedNextSteps,
+      confidence: newConfidence,
+      lastUpdated: Date.now(),
+      topicStability: room.summary.topicStability
+    };
+
+    // Single broadcast with all updates (batched)
+    room.broadcast({
+      type: 'state',
+      room: {
+        code: room.code,
+        summary: room.summary,
+        micRoster: room.getMicRoster()
+      },
+      topicShift: topicShiftDetected ? {
+        topic: finalTopic,
+        subtopic: result.subtopic || '',
+        status: result.status || 'Deciding',
+        confidence: newConfidence
+      } : null
+    });
+
+  } catch (error) {
+    logger.error(`[${room.code}] Summary update error:`, error.message);
+  } finally {
+    room.summaryBusy = false;
+    
+    // Retry if there was a pending update
+    if (room.summaryPending) {
+      setImmediate(() => updateSummary(room));
+    }
+  }
+}
+
+// "What I missed" function
+async function generateMissedSummary(room, sinceTimestamp) {
+  const cutoff = sinceTimestamp || (Date.now() - 45000); // Default 45 seconds
+  const missedTranscripts = room.transcripts.filter(t => t.ts >= cutoff);
+  
+  if (missedTranscripts.length === 0) {
+    return {
+      missed: 'No new activity since your last check.',
+      key_points: []
+    };
+  }
+
+  const transcriptText = missedTranscripts
+    .map(t => `${t.speaker}: ${t.text}`)
+    .join('\n');
+
+  const prompt = `Summarize this conversation segment using ONLY the content in the transcript below. NEVER invent details.
+
+CRITICAL RULES:
+- ONLY summarize what is explicitly stated in the transcript
+- NEVER add information that isn't in the transcript
+- If the transcript is sparse, reflect that accurately
+- If there are no clear key points, use an empty array
+
+Transcript (ONLY use content from here):
+${transcriptText}
+
+Respond in JSON:
+{
+  "missed": "1-2 sentence summary, max 220 chars - ONLY what's in the transcript",
+  "key_points": ["only points explicitly stated", ...]
+}`;
+
+  try {
+    const completion = await withTimeout(
+      openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.1, // Lower temperature for more factual, less creative output
+        response_format: { type: 'json_object' }
+      }),
+      API_TIMEOUT_MS,
+      'Missed summary request timed out'
+    );
+
+    let result;
+    try {
+      result = JSON.parse(completion.choices[0].message.content);
+    } catch (error) {
+      logger.error('Failed to parse missed summary JSON:', error);
+      logger.error('Raw response:', completion.choices[0].message.content);
+      
+      // Try to extract JSON from markdown code blocks
+      const content = completion.choices[0].message.content;
+      const jsonMatch = content.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
+      
+      if (jsonMatch) {
+        try {
+          result = JSON.parse(jsonMatch[1]);
+        } catch (e) {
+          logger.error('Failed to parse extracted JSON:', e);
+          return {
+            missed: 'Unable to generate summary at this time.',
+            key_points: []
+          };
+        }
+      } else {
+        return {
+          missed: 'Unable to generate summary at this time.',
+          key_points: []
+        };
+      }
+    }
+    
+    // Clamp missed summary and key points
+    return {
+      missed: clampSummary(result.missed || 'No new activity.', 220),
+      key_points: clampArray(result.key_points || [], 5)
+    };
+  } catch (error) {
+    logger.error(`[${room.code}] Missed summary error:`, error.message);
+    return {
+      missed: 'Unable to generate summary at this time.',
+      key_points: []
+    };
+  }
+}
+
+// Process audio queue
+async function processAudioQueue(room) {
+  // Atomic check-and-set to prevent race conditions
+  if (room.audioBusy || room.audioQueue.length === 0) return;
+  
+  // Double-check after setting flag
+  const wasBusy = room.audioBusy;
+  room.audioBusy = true;
+  if (wasBusy) return; // Another process already started
+  
+  const chunk = room.audioQueue.shift();
+
+  try {
+    const { clientId, speaker, audioBuffer, ext, tsEnd } = chunk;
+    
+    logger.info(`[${room.code}] Processing audio chunk from ${speaker}: ${audioBuffer.length} bytes, ext=${ext}`);
+    
+    if (audioBuffer.length > MAX_CHUNK_SIZE) {
+      logger.warn(`[${room.code}] Chunk too large: ${audioBuffer.length} bytes (max: ${MAX_CHUNK_SIZE})`);
+      return; // Will be handled in finally block
+    }
+
+    if (audioBuffer.length === 0) {
+      logger.warn(`[${room.code}] Empty audio chunk received`);
+      return; // Will be handled in finally block
+    }
+
+    // Convert to 16kHz mono WAV for consistent transcription quality (preferred),
+    // but keep a correct-format fallback if FFmpeg fails.
+    logger.debug(`[${room.code}] Converting ${ext} to WAV...`);
+    let transcribeBuffer;
+    let transcribeExt = 'wav';
+    let wavDur = null;
+    let wavRms = null;
+    try {
+      const wavBuffer = await convertToWav16kMono({ audioBuffer, ext: ext || 'webm' });
+      logger.debug(`[${room.code}] Converted to WAV: ${wavBuffer.length} bytes`);
+      transcribeBuffer = wavBuffer;
+      transcribeExt = 'wav';
+
+      if (DEBUG_DUMP_WAV) {
+        const now = Date.now();
+        if (now - lastDebugDumpAt >= DEBUG_DUMP_WAV_COOLDOWN_MS) {
+          lastDebugDumpAt = now;
+          try {
+            await fs.writeFile(DEBUG_DUMP_WAV_PATH, wavBuffer);
+            logger.info(`[${room.code}] DEBUG_DUMP_WAV wrote: ${DEBUG_DUMP_WAV_PATH} (${wavBuffer.length} bytes)`);
+          } catch (e) {
+            logger.warn(`[${room.code}] DEBUG_DUMP_WAV failed: ${e?.message || e}`);
+          }
+        }
+      }
+
+      wavDur = wavDurationSeconds16kMonoPcm16le(wavBuffer);
+      wavRms = wavRms16leNormalized(wavBuffer);
+      if ((wavDur !== null && wavDur < MIN_WAV_SEC) || (wavRms !== null && wavRms < MIN_WAV_RMS)) {
+        logger.info(
+          `[${room.code}] Skipping low-signal audio from ${speaker} (dur=${wavDur?.toFixed?.(2) ?? 'n/a'}s rms=${wavRms?.toFixed?.(4) ?? 'n/a'})`
+        );
+        const reason = (wavDur !== null && wavDur < MIN_WAV_SEC) ? 'short' : 'quiet';
+        maybeBroadcastAudioWarning(room, {
+          key: clientId,
+          speaker,
+          reason,
+          rms: wavRms,
+          dur: wavDur,
+          message:
+            reason === 'quiet'
+              ? `Audio too quiet. Move the mic closer or check input device. (rms=${wavRms?.toFixed?.(4) ?? 'n/a'})`
+              : `Audio chunk too short. Speak a little longer. (dur=${wavDur?.toFixed?.(2) ?? 'n/a'}s)`
+        });
+        return;
+      }
+    } catch (error) {
+      logger.error(`[${room.code}] FFmpeg conversion error:`, error.message);
+      maybeBroadcastAudioWarning(room, {
+        key: clientId,
+        speaker,
+        reason: 'format',
+        message: 'Audio format/fragment issue. Refresh the mic page or re-join the room.'
+      });
+      if (!ALLOW_DIRECT_TRANSCRIBE_FALLBACK) {
+        return;
+      }
+      transcribeBuffer = audioBuffer;
+      transcribeExt = ext || 'webm';
+      logger.info(`[${room.code}] Falling back to direct transcription (ext=${transcribeExt})`);
+    }
+
+    // Per-mic rolling prompt context (improves "true text" on chunked audio).
+    // Key by mic/clientId so each device gets its own continuity string.
+    const micKey = clientId || speaker || 'unknown';
+    let prior = room.promptByMic.get(micKey) || '';
+    if (!prior) {
+      // Fallback to room-wide recent transcript if this mic has no history yet.
+      prior = room.transcripts
+        .slice(-CONTEXT_ENTRIES)
+        .map(t => t.text)
+        .join(' ');
+    }
+    const prompt = buildMicPrompt(prior);
+    
+    logger.debug(`[${room.code}] Transcribing audio with prompt (${prompt.length} chars)...`);
+    const text = await withTimeout(
+      transcribeAudio(transcribeBuffer, transcribeExt, prompt, { audioOk: transcribeExt === 'wav', wavRms, wavDur }),
+      API_TIMEOUT_MS,
+      'Transcription request timed out'
+    );
+    logger.info(`[${room.code}] Transcription result: "${text}"`);
+    
+    if (text && text.trim().length > 0) {
+      // Only add if meaningful (more than just whitespace/punctuation)
+      const meaningfulText = text.trim().replace(/^[^\w]+|[^\w]+$/g, '');
+      if (meaningfulText.length > 0) {
+        if (isGarbageTranscript(text)) {
+          logger.info(`[${room.code}] Dropping low-quality transcript from ${speaker}: "${text}"`);
+          return;
+        }
+        // If we still get nonsense with good audio, drop and emit one actionable warning (rate-limited).
+        if (transcribeExt === 'wav' && !looksEnglishEnough(text) && englishScore(text) < 0.25) {
+          logger.info(`[${room.code}] Dropping nonsense transcript from ${speaker}: "${text}"`);
+          maybeBroadcastAudioWarning(room, {
+            key: clientId,
+            speaker,
+            reason: 'nonsense',
+            rms: wavRms,
+            dur: wavDur,
+            message: 'Hard to understand audio. Move mic closer or reduce background noise.'
+          });
+          return;
+        }
+
+        // Update rolling prompt context only after passing sanity checks (prevents poisoning the prompt).
+        const existing = room.promptByMic.get(micKey) || '';
+        room.promptByMic.set(micKey, (existing + ' ' + text).trim().slice(-PROMPT_CONTEXT_MAX_CHARS));
+
+        const entry = {
+          id: randomBytes(8).toString('hex'),
+          ts: tsEnd || Date.now(),
+          speaker: speaker || 'Unknown',
+          text
+        };
+
+        const inserted = room.addTranscript(entry);
+        if (inserted) {
+          // Update mic activity (multi-location architecture)
+          const client = room.clients.get(clientId);
+          if (client?.micId) {
+            room.updateMicActivity(client.micId, true);
+          }
+          
+          // Broadcast transcript
+          room.broadcast({
+            type: 'transcript',
+            entry
+          });
+        }
+        
+        if (inserted) {
+          logger.info(`[${room.code}] Transcript broadcast: ${entry.speaker}: ${text}`);
+        } else {
+          logger.debug(`[${room.code}] Transcript de-duped (not broadcast): ${entry.speaker}: ${text}`);
+        }
+      } else {
+        logger.debug(`[${room.code}] Only punctuation/whitespace detected`);
+      }
+    } else {
+      logger.debug(`[${room.code}] No speech detected in audio chunk`);
+    }
+  } catch (error) {
+    logger.error(`[${room.code}] Audio processing error (client: ${chunk?.clientId || 'unknown'}):`, {
+      message: error.message,
+      stack: error.stack,
+      chunkSize: chunk?.audioBuffer?.length,
+      ext: chunk?.ext
+    });
+  } finally {
+    room.audioBusy = false;
+    // Process next chunk if available
+    if (room.audioQueue.length > 0) {
+      setImmediate(() => processAudioQueue(room));
+    }
+  }
+}
+
+// WebSocket connection handler
+wss.on('connection', (ws) => {
+  const clientId = generateClientId();
+  let currentRoom = null;
+
+  ws.send(JSON.stringify({ type: 'hello', clientId }));
+
+  ws.on('message', async (data) => {
+    let message;
+    try {
+      message = JSON.parse(data.toString());
+    } catch (error) {
+      logger.error(`Invalid JSON message from client ${clientId}:`, error.message);
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Invalid message format'
+      }));
+      return;
+    }
+    
+    // Validate message structure
+    if (!message.type || typeof message.type !== 'string') {
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Message must have a type field'
+      }));
+      return;
+    }
+    
+    try {
+
+      switch (message.type) {
+        case 'create_room': {
+          const code = generateRoomCode();
+          const room = new Room(code);
+          rooms.set(code, room);
+          
+          const sanitizedName = sanitizeName(message.name || 'Viewer');
+          room.addClient(clientId, 'viewer', sanitizedName, ws);
+          currentRoom = code;
+
+          // Start summary timer
+          room.summaryTimer = setInterval(() => {
+            updateSummary(room);
+          }, SUMMARY_INTERVAL_SEC * 1000);
+
+          ws.send(JSON.stringify({
+            type: 'room_created',
+            roomCode: code,
+            adminToken: room.adminToken
+          }));
+
+          ws.send(JSON.stringify({
+            type: 'joined',
+            roomCode: code,
+            clientId,
+            role: 'viewer',
+            name: sanitizedName
+          }));
+
+          // Send initial state
+          ws.send(JSON.stringify({
+            type: 'state',
+            room: {
+              code,
+              summary: room.summary,
+              micRoster: room.getMicRoster()
+            }
+          }));
+
+          // Send recent transcripts
+          ws.send(JSON.stringify({
+            type: 'recent_transcripts',
+            entries: room.transcripts.slice(-RECENT_TRANSCRIPTS_SENT)
+          }));
+
+          break;
+        }
+
+        case 'join': {
+          // Validate room code format
+          if (!validateRoomCode(message.roomCode)) {
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: 'Invalid room code format'
+            }));
+            return;
+          }
+          
+          const room = rooms.get(message.roomCode);
+          if (!room) {
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: 'Room not found'
+            }));
+            return;
+          }
+
+          const sanitizedName = sanitizeName(message.name || 'Mic');
+          room.addClient(clientId, message.role || 'mic', sanitizedName, ws);
+          currentRoom = message.roomCode;
+
+          ws.send(JSON.stringify({
+            type: 'joined',
+            roomCode: message.roomCode,
+            clientId,
+            role: message.role || 'mic',
+            name: sanitizedName
+          }));
+
+          // Send current state
+          ws.send(JSON.stringify({
+            type: 'state',
+            room: {
+              code: message.roomCode,
+              summary: room.summary,
+              micRoster: room.getMicRoster()
+            }
+          }));
+
+          ws.send(JSON.stringify({
+            type: 'recent_transcripts',
+            entries: room.transcripts.slice(-RECENT_TRANSCRIPTS_SENT)
+          }));
+
+          break;
+        }
+
+        case 'audio_chunk': {
+          if (!currentRoom) {
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: 'Not in a room'
+            }));
+            return;
+          }
+
+          const room = rooms.get(currentRoom);
+          if (!room) {
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: 'Room not found'
+            }));
+            return;
+          }
+
+          const client = room.clients.get(clientId);
+          if (!client || client.role !== 'mic') {
+            ws.send(JSON.stringify({
+              type: 'warn',
+              message: 'Only mic clients can send audio'
+            }));
+            return;
+          }
+
+          // Rate limiting check
+          const now = Date.now();
+          const rate = room.clientChunkRates.get(clientId) || { count: 0, resetAt: now + 60000 };
+          
+          if (now > rate.resetAt) {
+            rate.count = 0;
+            rate.resetAt = now + 60000;
+          }
+          
+          rate.count++;
+          if (rate.count > RATE_LIMIT_CHUNKS_PER_MINUTE) {
+            logger.warn(`[${room.code}] Rate limit exceeded for client ${clientId}: ${rate.count} chunks/min`);
+            ws.send(JSON.stringify({
+              type: 'warn',
+              message: 'Rate limit exceeded. Please slow down.'
+            }));
+            return;
+          }
+          
+          room.clientChunkRates.set(clientId, rate);
+
+          const b64 = message.data;
+          const mime = String(message.mime || 'audio/webm');
+          const speaker = client.name;
+
+          if (!b64 || typeof b64 !== 'string') {
+            logger.warn(`[${room.code}] Invalid audio chunk data from ${speaker}`);
+            return;
+          }
+
+          // Validate base64 string length before decoding
+          const estimatedSize = (b64.length * 3) / 4;
+          if (estimatedSize > MAX_CHUNK_SIZE * 2) {
+            logger.warn(`[${room.code}] Chunk too large (estimated ${Math.round(estimatedSize / 1024)} KB) from ${speaker}`);
+            ws.send(JSON.stringify({
+              type: 'warn',
+              message: `Chunk too large (estimated ${Math.round(estimatedSize / 1024)} KB)`
+            }));
+            return;
+          }
+
+          let audioBuffer = Buffer.from(b64, 'base64');
+          const kb = Math.round(audioBuffer.length / 1024 * 100) / 100;
+
+          if (audioBuffer.length > MAX_CHUNK_SIZE) {
+            logger.warn(`[${room.code}] Chunk too large: ${audioBuffer.length} bytes (max: ${MAX_CHUNK_SIZE}) from ${speaker}`);
+            ws.send(JSON.stringify({
+              type: 'warn',
+              message: `Chunk too large (${kb} KB, max: ${Math.round(MAX_CHUNK_SIZE / 1024)} KB)`
+            }));
+            return;
+          }
+
+          // Decide file extension from mime (CRITICAL for transcription)
+          let ext = 'webm';
+          if (mime.includes('ogg')) ext = 'ogg';
+          if (mime.includes('webm')) ext = 'webm';
+          if (mime.includes('mp4')) ext = 'mp4';
+          if (mime.includes('aac')) ext = 'aac';
+
+          // Cache init/header segments for fragmented formats (Firefox WebM, iOS fragmented MP4)
+          if (message.init === true) {
+            client.lastSeen = Date.now();
+
+            if (ext === 'webm') {
+              // Keep only EBML header prefix (up to before the first Cluster) to avoid duplicating audio frames.
+              const clusterSig = Buffer.from([0x1f, 0x43, 0xb6, 0x75]);
+              const idx = audioBuffer.indexOf(clusterSig);
+              if (idx > 0) {
+                client.webmHeader = audioBuffer.slice(0, idx);
+                logger.info(`[${room.code}] Cached WebM header for ${speaker} (${Math.round(client.webmHeader.length / 1024)}KB)`);
+              } else {
+                // Fallback: store whole chunk as header (better than nothing)
+                client.webmHeader = audioBuffer;
+                logger.warn(`[${room.code}] WebM header cluster not found; cached full init chunk for ${speaker}`);
+              }
+            }
+
+            if (ext === 'mp4') {
+              // Cache init segment (ftyp+moov) for fragmented MP4.
+              const ftypIdx = audioBuffer.indexOf(Buffer.from('ftyp', 'ascii'));
+              const moovIdx = audioBuffer.indexOf(Buffer.from('moov', 'ascii'));
+              if (ftypIdx !== -1 && moovIdx !== -1 && moovIdx >= 4) {
+                const moovSize = audioBuffer.readUInt32BE(moovIdx - 4);
+                const end = Math.min(audioBuffer.length, (moovIdx - 4) + moovSize);
+                client.mp4Init = audioBuffer.slice(0, end);
+                logger.info(`[${room.code}] Cached MP4 init for ${speaker} (${Math.round(client.mp4Init.length / 1024)}KB)`);
+              } else {
+                client.mp4Init = audioBuffer;
+                logger.warn(`[${room.code}] MP4 init parse failed; cached full init chunk for ${speaker}`);
+              }
+            }
+
+            // ACK so mic UI sees the server is receiving data
+            ws.send(JSON.stringify({ type: 'audio_ack', roomCode: room.code, kb, ext, init: true }));
+            return;
+          }
+
+          // Repair fragmented WebM by prepending cached EBML header if needed
+          if (ext === 'webm' && client.webmHeader && audioBuffer.length >= 4) {
+            const ebml = audioBuffer.readUInt32BE(0);
+            const EBML_MAGIC = 0x1A45DFA3;
+            if (ebml !== EBML_MAGIC) {
+              audioBuffer = Buffer.concat([client.webmHeader, audioBuffer]);
+            }
+          }
+
+          // Repair fragmented MP4 by prepending cached init segment to moof/mdat fragments
+          if (ext === 'mp4' && client.mp4Init && audioBuffer.length >= 8) {
+            const boxType = audioBuffer.toString('ascii', 4, 8);
+            if (boxType === 'moof' || boxType === 'mdat') {
+              audioBuffer = Buffer.concat([client.mp4Init, audioBuffer]);
+            }
+          }
+
+          // ACK immediately so mic UI can show "server is hearing me"
+          ws.send(JSON.stringify({
+            type: 'audio_ack',
+            roomCode: room.code,
+            kb,
+            ext
+          }));
+
+          // Log on server for debugging
+          logger.debug(`[${room.code}] audio_chunk from ${speaker} ${kb}KB mime=${mime} ext=${ext}`);
+
+          // Enqueue (per-room)
+          room.audioQueue.push({
+            clientId,
+            speaker,
+            audioBuffer,
+            mime,
+            ext,
+            tsEnd: message.tsEnd || Date.now()
+          });
+
+          processAudioQueue(room);
+          break;
+        }
+
+        case 'missed': {
+          if (!currentRoom) {
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: 'Not in a room'
+            }));
+            return;
+          }
+
+          const room = rooms.get(currentRoom);
+          if (!room) {
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: 'Room not found'
+            }));
+            return;
+          }
+
+          const result = await generateMissedSummary(room, message.since);
+          ws.send(JSON.stringify({
+            type: 'missed_result',
+            ...result
+          }));
+
+          break;
+        }
+
+        case 'delete_room': {
+          if (!currentRoom) {
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: 'Not in a room'
+            }));
+            return;
+          }
+
+          const room = rooms.get(currentRoom);
+          if (!room) {
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: 'Room not found'
+            }));
+            return;
+          }
+
+          // Verify admin token
+          if (message.adminToken !== room.adminToken) {
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: 'Unauthorized'
+            }));
+            return;
+          }
+
+          // Delete room
+          if (room.summaryTimer) clearInterval(room.summaryTimer);
+          rooms.delete(currentRoom);
+          
+          ws.send(JSON.stringify({
+            type: 'room_deleted'
+          }));
+          
+          ws.close();
+          break;
+        }
+
+        case 'ping': {
+          ws.send(JSON.stringify({ type: 'pong' }));
+          break;
+        }
+      }
+    } catch (error) {
+      logger.error(`WebSocket message error (client: ${clientId}, room: ${currentRoom}):`, {
+        message: error.message,
+        stack: error.stack,
+        messageType: message?.type
+      });
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: error.message
+      }));
+    }
+  });
+
+  ws.on('error', (error) => {
+    logger.error(`WebSocket error for client ${clientId}:`, {
+      message: error.message,
+      stack: error.stack
+    });
+    
+    // Clean up on error
+    if (currentRoom) {
+      const room = rooms.get(currentRoom);
+      if (room) {
+        room.removeClient(clientId);
+        if (room.clients.size === 0) {
+          if (room.summaryTimer) clearInterval(room.summaryTimer);
+          rooms.delete(currentRoom);
+          logger.info(`[${currentRoom}] Room deleted due to client error`);
+        }
+      }
+    }
+  });
+
+  ws.on('close', () => {
+    if (currentRoom) {
+      const room = rooms.get(currentRoom);
+      if (room) {
+        room.removeClient(clientId);
+        if (room.clients.size === 0) {
+          // Clean up empty room
+          if (room.summaryTimer) clearInterval(room.summaryTimer);
+          rooms.delete(currentRoom);
+        }
+      }
+    }
+  });
+});
+
+// Create room endpoint
+app.post('/api/rooms', (req, res) => {
+  try {
+    const code = generateRoomCode();
+    const room = new Room(code);
+    rooms.set(code, room);
+    
+    // Start summary timer
+    room.summaryTimer = setInterval(() => {
+      updateSummary(room);
+    }, SUMMARY_INTERVAL_SEC * 1000);
+    
+    res.json({ roomId: code });
+  } catch (error) {
+    logger.error('Room creation error:', error.message);
+    res.status(500).json({ error: 'Failed to create room' });
+  }
+});
+
+// Delete room endpoint
+app.delete('/api/room/:code', (req, res) => {
+  const { code } = req.params;
+  const { adminToken } = req.body;
+  
+  const room = rooms.get(code);
+  if (!room) {
+    return res.status(404).json({ error: 'Room not found' });
+  }
+  
+  if (adminToken !== room.adminToken) {
+    return res.status(403).json({ error: 'Unauthorized' });
+  }
+  
+  if (room.summaryTimer) clearInterval(room.summaryTimer);
+  if (room.micHealthTimer) clearInterval(room.micHealthTimer);
+  rooms.delete(code);
+  
+  res.json({ success: true });
+});
+
+// Multi-location architecture: Create OpenAI Realtime API session
+// Returns ephemeral session credentials for client to connect directly to OpenAI
+app.post('/api/realtime/session', async (req, res) => {
+  try {
+    const { roomCode, micId, clientId } = req.body;
+    
+    if (!roomCode || !validateRoomCode(roomCode)) {
+      return res.status(400).json({ error: 'Invalid room code' });
+    }
+    
+    const room = rooms.get(roomCode);
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    
+    // Verify client is in the room
+    const client = room.clients.get(clientId);
+    if (!client || client.role !== 'mic') {
+      return res.status(403).json({ error: 'Unauthorized: not a mic client' });
+    }
+    
+    // OpenAI Realtime API integration
+    // Note: OpenAI Realtime API requires clients to connect directly to OpenAI's WebSocket endpoint
+    // The server can mint ephemeral session tokens or clients can use API keys directly
+    // 
+    // For production, implement based on OpenAI's actual Realtime API:
+    // - Option 1: Client uses API key directly (simpler, but exposes key to client)
+    // - Option 2: Server mints ephemeral session tokens (more secure, requires OpenAI SDK support)
+    //
+    // Current implementation: Placeholder that indicates Realtime mode is available
+    // The actual Realtime API integration should be implemented based on OpenAI's latest API docs
+    res.json({
+      session_id: `session_${randomBytes(16).toString('hex')}`,
+      micId: micId || clientId,
+      message: 'Realtime API integration pending - use chunked transcription for now'
+    });
+  } catch (error) {
+    logger.error('Realtime session creation error:', error.message);
+    res.status(500).json({ error: 'Failed to create Realtime session' });
+  }
+});
+
+// Multi-location architecture: Receive transcript events from Realtime API
+// Client forwards transcript events from OpenAI Realtime API to server for merging
+app.post('/api/realtime/transcript', async (req, res) => {
+  try {
+    const { roomCode, micId, ts, text, isFinal, speaker } = req.body;
+    
+    if (!roomCode || !validateRoomCode(roomCode)) {
+      return res.status(400).json({ error: 'Invalid room code' });
+    }
+    
+    if (!text || typeof text !== 'string') {
+      return res.status(400).json({ error: 'Invalid transcript text' });
+    }
+    
+    const room = rooms.get(roomCode);
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+    
+    const normalizedText = normalizeText(text);
+    if (!normalizedText || isGarbageTranscript(normalizedText)) {
+      return res.json({ success: true, skipped: true });
+    }
+    
+    // Update mic activity
+    room.updateMicActivity(micId, isFinal);
+    
+    // Create transcript entry
+    const entry = {
+      id: randomBytes(8).toString('hex'),
+      ts: ts || Date.now(),
+      speaker: speaker || 'Unknown',
+      text: normalizedText
+    };
+    
+    // Add transcript and broadcast if inserted
+    const inserted = room.addTranscript(entry);
+    if (inserted) {
+      // Broadcast transcript to viewers
+      room.broadcast({
+        type: 'transcript',
+        entry
+      });
+      
+      logger.info(`[${roomCode}] Realtime transcript: ${entry.speaker}: ${entry.text}`);
+    }
+    
+    res.json({ success: true, inserted });
+  } catch (error) {
+    logger.error('Realtime transcript error:', error.message);
+    res.status(500).json({ error: 'Failed to process transcript' });
+  }
+});
+
+// Network helper endpoint (used by client to build share links from localhost)
+app.get('/api/network', (req, res) => {
+  const lanIp = getLanIp();
+  const publicBaseUrl = String(process.env.PUBLIC_BASE_URL || '').trim() || null;
+  res.json({ lanIp, publicBaseUrl });
+});
+
+// Server-rendered invite QR (used by the Viewer invite modal)
+app.get('/api/room/:code/invite-qr.png', async (req, res) => {
+  try {
+    const code = String(req.params.code || '').trim().toUpperCase();
+    if (!code || code.length !== 6) {
+      return res.status(400).json({ error: 'Invalid room code' });
+    }
+    const room = rooms.get(code);
+    if (!room) {
+      return res.status(404).json({ error: 'Room not found' });
+    }
+
+    const role = String(req.query.role || 'viewer').trim().toLowerCase();
+    const origin = getPublicBaseUrl(req);
+    if (!origin) {
+      return res.status(500).json({ error: 'Unable to determine base URL' });
+    }
+
+    // Default QR always points to /viewer (never /mic)
+    let url;
+    if (role === 'mic') {
+      // Secondary mic link (optional)
+      url = new URL('/mic', origin);
+      url.searchParams.set('room', code);
+    } else {
+      // Primary viewer link (default)
+      url = new URL('/viewer', origin);
+      url.searchParams.set('room', code);
+    }
+
+    const png = await QRCode.toBuffer(url.toString(), {
+      type: 'png',
+      errorCorrectionLevel: 'M',
+      width: 320,
+      margin: 1
+    });
+
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(200).end(png);
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || 'QR generation failed' });
+  }
+});
+
+server.listen(PORT, () => {
+  logger.info(`RoomBrief server running on http://localhost:${PORT}`);
+  logger.info(`Transcription model: ${TRANSCRIBE_MODEL} (temperature: ${TRANSCRIBE_TEMPERATURE})`);
+  logger.info(`Summary interval: ${SUMMARY_INTERVAL_SEC}s`);
+  logger.info(`Transcription retries: ${TRANSCRIBE_RETRY_ATTEMPTS}, context words: ${TRANSCRIBE_CONTEXT_WORDS}`);
+  logger.info(`Rate limit: ${RATE_LIMIT_CHUNKS_PER_MINUTE} chunks/min per client`);
+  logger.info(`API timeout: ${API_TIMEOUT_MS}ms`);
+  logger.info(`Log level: ${LOG_LEVEL}`);
+});
+

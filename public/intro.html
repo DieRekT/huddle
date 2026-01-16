@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Huddle - Intro</title>
+    <link rel="stylesheet" href="/theme.css">
+    <link rel="stylesheet" href="/intro.css">
+</head>
+<body>
+    <div class="intro-screen">
+        <!-- Canvas layer for Enhanced mode -->
+        <canvas id="particleCanvas"></canvas>
+        
+        <!-- SVG/CSS Lite mode container -->
+        <div class="intro-lite-container" id="introLiteContainer">
+            <div class="intro-logo-container" id="logoContainer">
+                <!-- SVG mark will be loaded here by intro.js -->
+            </div>
+            
+            <!-- Animation elements for Lite mode phases -->
+            <div class="intro-stars">
+                <div class="star star-1"></div>
+                <div class="star star-2"></div>
+                <div class="star star-3"></div>
+                <div class="star star-4"></div>
+            </div>
+            
+            <div class="intro-ripples">
+                <div class="ripple ripple-1"></div>
+                <div class="ripple ripple-2"></div>
+                <div class="ripple ripple-3"></div>
+            </div>
+            
+            <div class="intro-arcs">
+                <div class="arc arc-1"></div>
+                <div class="arc arc-2"></div>
+                <div class="arc arc-3"></div>
+            </div>
+            
+            <div class="intro-core" id="introCore"></div>
+        </div>
+        
+        <!-- Overlay: status message -->
+        <div class="intro-overlay">
+            <div class="intro-status">Huddle is preparing your room…</div>
+        </div>
+        
+        <!-- Controls: top-right overlay -->
+        <div class="intro-controls">
+            <div class="intro-controls-group">
+                <!-- Mode selector -->
+                <select id="introModeSelector" class="intro-select" title="Animation mode">
+                    <option value="auto">Auto</option>
+                    <option value="lite">Lite</option>
+                    <option value="enhanced">Enhanced</option>
+                </select>
+                
+                <!-- Skip button -->
+                <button id="introSkipBtn" class="intro-btn intro-btn-secondary">Skip</button>
+            </div>
+            
+        </div>
+    </div>
+    
+    <script src="/intro.js"></script>
+</body>
+</html>

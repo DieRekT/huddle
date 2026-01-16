@@ -1,0 +1,220 @@
+/* Huddle Design System - Celtics Theme */
+/* Single source of truth for design tokens and shared components */
+
+:root {
+    /* ===== COLOR TOKENS ===== */
+    
+    /* Celtics Brand Colors */
+    --brand: #007A33;              /* Celtics green - primary brand */
+    --brand-deep: #005A24;         /* Deep green - darker shade */
+    --brand-light: #00a852;        /* Light green - lighter shade */
+    --accent: #BA9653;             /* Championship gold */
+    --accent-bright: #FFD700;      /* Bright gold accent */
+    
+    /* Neutral Colors */
+    --bg: #F3FBF6;                 /* Background - soft green tint */
+    --surface: #ffffff;            /* Card/surface background */
+    --surface-2: rgba(255, 255, 255, 0.82); /* Blurred bars */
+    --ink: #0B1220;                /* Primary text */
+    --muted: #64748b;              /* Secondary text */
+    
+    /* Semantic Colors */
+    --success: var(--brand);
+    --warning: var(--accent);
+    --danger: #b91c1c;
+    
+    /* Borders & Shadows */
+    --border: #e2e8f0;
+    --hairline: rgba(226, 232, 240, 0.85);
+    --shadow-sm: 0 10px 26px rgba(15, 23, 42, 0.08);
+    --shadow-md: 0 14px 40px rgba(15, 23, 42, 0.10);
+    
+    /* Spacing & Shape */
+    --radius: 20px;
+    --radius-sm: 14px;
+    
+    /* Legacy aliases (for backward compatibility) */
+    --celtics-green: var(--brand);
+    --celtics-green-dark: var(--brand-deep);
+    --celtics-green-light: var(--brand-light);
+    --celtics-gold: var(--accent);
+    --celtics-white: #FFFFFF;
+    --primary: var(--brand);
+    --primary-dark: var(--brand-deep);
+    --primary-light: rgba(0, 122, 51, 0.12);
+    --primaryText: #ffffff;
+    --secondary: #ffffff;
+    --ok: var(--success);
+    --card-bg: var(--surface);
+    --text-light: var(--muted);
+    --text-muted: rgba(11, 18, 32, 0.60);
+    --border-light: var(--hairline);
+    --shadow: rgba(15, 23, 42, 0.12);
+    --shadow-lg: rgba(15, 23, 42, 0.18);
+}
+
+/* Dark Mode */
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #000000;
+        --surface: #07170F;        /* Dark green-tinted surface (Celtics theme) */
+        --surface-2: rgba(7, 23, 15, 0.75);
+        --ink: #f9fafb;
+        --muted: rgba(249, 250, 251, 0.70);
+        --border: rgba(249, 250, 251, 0.14);
+        --hairline: rgba(249, 250, 251, 0.10);
+        --shadow-sm: 0 1px 0 rgba(255,255,255,0.04), 0 18px 60px rgba(0,0,0,0.45);
+        --shadow-md: 0 1px 0 rgba(255,255,255,0.04), 0 26px 90px rgba(0,0,0,0.55);
+        --secondary: rgba(249, 250, 251, 0.10);
+        --text-muted: rgba(249, 250, 251, 0.52);
+        --accent: var(--brand-light);
+        --primary: var(--brand-light);
+    }
+}
+
+/* ===== SHARED COMPONENTS ===== */
+
+/* Card */
+.card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+    box-shadow: var(--shadow-sm);
+}
+
+/* Button */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.75rem 1.5rem;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-weight: 600;
+    font-size: 0.9375rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-decoration: none;
+}
+
+.btn-primary {
+    background: var(--brand);
+    color: var(--primaryText);
+}
+
+.btn-primary:hover {
+    background: var(--brand-deep);
+}
+
+.btn-secondary {
+    background: var(--surface);
+    color: var(--ink);
+    border: 1px solid var(--border);
+}
+
+.btn-secondary:hover {
+    background: var(--surface-2);
+}
+
+.btn-small {
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+}
+
+/* Pill (Room code, status) */
+.pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.375rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.875rem;
+    font-weight: 600;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--ink);
+}
+
+.pill-dark {
+    background: var(--surface);
+    border-color: var(--border);
+    color: var(--ink);
+}
+
+/* Chip (Mic health indicators) */
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.25rem 0.625rem;
+    border-radius: 999px;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    background: var(--surface);
+    border: 1px solid var(--border);
+}
+
+.chip-live {
+    background: rgba(0, 122, 51, 0.1);
+    border-color: var(--brand);
+    color: var(--brand-deep);
+}
+
+.chip-quiet {
+    background: rgba(186, 150, 83, 0.1);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.chip-offline {
+    background: var(--surface);
+    border-color: var(--border);
+    color: var(--muted);
+}
+
+/* Top Bar */
+.topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.5rem;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    backdrop-filter: blur(12px);
+    background: var(--surface-2);
+}
+
+.topbar-left,
+.topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.brand-text {
+    font-weight: 700;
+    font-size: 1.125rem;
+    color: var(--ink);
+    letter-spacing: -0.02em;
+}
+
+
+
+
+
+
+
+
+
+
+
