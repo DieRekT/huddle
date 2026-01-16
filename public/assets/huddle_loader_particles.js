@@ -103,7 +103,10 @@
     }
 
     function makeTargets() {
-      if (!imgLoaded || !img) return [];
+      if (!imgLoaded || !img || !img.complete) {
+        console.warn("makeTargets called but image not ready");
+        return [];
+      }
 
       const w = window.innerWidth;
       const h = window.innerHeight;
@@ -285,9 +288,17 @@
 
     function resetSim() {
       resize();
-      if (imgLoaded) {
+      if (imgLoaded && img) {
         targets = makeTargets();
-        spawnParticles();
+        if (targets.length > 0) {
+          spawnParticles();
+        } else {
+          console.warn("No targets generated from image - check image path and format");
+        }
+      } else {
+        console.warn("Image not loaded yet - cannot generate particles");
+        targets = [];
+        particles = [];
       }
       startTime = 0;
       doneOnce = false;
@@ -298,16 +309,25 @@
       
       // Load image if not already loaded
       loadImage().then(() => {
+        // Double-check image is actually loaded before proceeding
+        if (!imgLoaded || !img || img.complete === false) {
+          console.error("Image load promise resolved but image not ready");
+          return;
+        }
         visible = true;
         root.classList.add("is-visible");
         resetSim();
-        cancelAnimationFrame(raf);
-        raf = requestAnimationFrame(tick);
+        // Only start animation if we have particles
+        if (particles.length > 0) {
+          cancelAnimationFrame(raf);
+          raf = requestAnimationFrame(tick);
+        } else {
+          console.error("No particles to animate - image may not have valid content");
+        }
       }).catch((err) => {
-        console.error("Failed to show loader:", err);
-        // Still show even if image fails (fallback)
-        visible = true;
-        root.classList.add("is-visible");
+        console.error("Failed to load wordmark image:", opts.imgSrc, err);
+        console.error("Loader will not display - please check image path");
+        // Don't show loader if image fails - better to show nothing than broken state
       });
     }
 

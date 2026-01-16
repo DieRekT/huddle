@@ -591,8 +591,9 @@ function getParticleLoader() {
     return particleLoader;
 }
 
-// Minimum display time for loader (900ms) to ensure visibility
-const LOADER_MIN_MS = 900;
+// Minimum display time for loader - animation needs ~3.3s (0.9s drift + 2.4s settle)
+// Add buffer for image loading and smooth completion
+const LOADER_MIN_MS = 4000; // 4 seconds to ensure logo forms
 const LOADER_FADE_MS = 220;
 
 // Helper function to show loader with minimum display time
@@ -601,16 +602,38 @@ function showLoaderWithMinDuration(loader) {
     const t0 = performance.now();
     loader.show();
     
-    // Return function to hide with minimum delay
+    // Return function to hide with minimum delay, waiting for animation to complete
     return function hideLoaderMinDelay() {
         if (!loader) return;
-        const elapsed = performance.now() - t0;
-        const wait = Math.max(0, LOADER_MIN_MS - elapsed);
-        setTimeout(() => {
-            if (loader && typeof loader.hide === 'function') {
+        let hidden = false;
+        
+        const hideWhenReady = () => {
+            if (hidden || !loader) return;
+            hidden = true;
+            if (typeof loader.hide === 'function') {
                 loader.hide();
             }
-        }, wait);
+        };
+        
+        // Poll every 100ms for animation completion
+        const pollInterval = setInterval(() => {
+            if (!loader) {
+                clearInterval(pollInterval);
+                return;
+            }
+            const elapsed = performance.now() - t0;
+            // Hide if animation is done OR minimum time has passed
+            if (loader.doneOnce || elapsed >= LOADER_MIN_MS) {
+                clearInterval(pollInterval);
+                hideWhenReady();
+            }
+        }, 100);
+        
+        // Fallback: ensure we hide after maximum wait time (safety net)
+        setTimeout(() => {
+            clearInterval(pollInterval);
+            hideWhenReady();
+        }, LOADER_MIN_MS + 1000);
     };
 }
 
