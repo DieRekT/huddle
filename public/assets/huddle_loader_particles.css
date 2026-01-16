@@ -1,0 +1,65 @@
+/* public/assets/huddle_loader_particles.css */
+
+.huddle-loader-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  display: none;
+}
+
+.huddle-loader-overlay.is-visible {
+  display: block;
+}
+
+.huddle-loader-canvas {
+  width: 100vw;
+  height: 100vh;
+  display: block;
+}
+
+.huddle-loader-ui {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  justify-content: flex-start;
+  pointer-events: none;
+}
+
+.huddle-loader-pill {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.12);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+  color: rgba(233,238,252,0.92);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+  font-size: 12px;
+  font-weight: 700;
+  user-select: none;
+}
+
+.huddle-loader-title { opacity: 0.95; }
+
+.huddle-loader-skip {
+  border: 0;
+  cursor: pointer;
+  font-weight: 800;
+  padding: 7px 11px;
+  border-radius: 999px;
+  background: rgba(38,194,129,0.14);
+  color: rgba(233,238,252,0.95);
+  border: 1px solid rgba(38,194,129,0.35);
+}
+
+.huddle-loader-skip:hover { filter: brightness(1.05); }
+
+@media (prefers-reduced-motion: reduce) {
+  .huddle-loader-overlay { display: none !important; }
+}
+

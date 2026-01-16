@@ -582,6 +582,15 @@ function getDeviceId() {
 
 const deviceId = getDeviceId();
 
+// Initialize particle loader (mount once, reuse)
+let particleLoader = null;
+function getParticleLoader() {
+    if (!particleLoader && window.HuddleParticleLoader) {
+        particleLoader = window.HuddleParticleLoader.mount();
+    }
+    return particleLoader;
+}
+
 // Initialize routes (/host, /viewer, /mic)
 async function initializeRoute() {
     if (!routeInfo) return;
@@ -1173,6 +1182,10 @@ function connectAndCreate() {
     
     // Create new connection or use existing
     if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        // Show particle loader before connecting
+        const loader = getParticleLoader();
+        if (loader) loader.show();
+        
         // Create new WebSocket connection
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}`;
@@ -1185,6 +1198,9 @@ function connectAndCreate() {
             wsConnected = true;
             reconnectAttempts = 0;
             updateStatusBars();
+            
+            // Hide loader on successful connection
+            if (loader) loader.hide();
             
             // Send create_room message once connected
             const passcode = roomPasscodeInput?.value?.trim() || null;
@@ -1208,6 +1224,7 @@ function connectAndCreate() {
         
         ws.onerror = (error) => {
             console.error('WebSocket error:', error);
+            if (loader) loader.hide();
             showError('Connection error. Please refresh the page.');
         };
         
@@ -1215,6 +1232,7 @@ function connectAndCreate() {
             console.log('WebSocket closed');
             wsConnected = false;
             updateStatusBars();
+            if (loader) loader.hide();
             
             if (currentRoom && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                 const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
@@ -1237,6 +1255,8 @@ function connectAndCreate() {
         ws.onopen = () => {
             if (originalOnOpen) originalOnOpen();
             if (ws.readyState === WebSocket.OPEN) {
+                const loader = getParticleLoader();
+                if (loader) loader.hide();
                 const passcode = roomPasscodeInput?.value?.trim() || null;
                 ws.send(JSON.stringify({
                     type: 'create_room',
@@ -1266,6 +1286,10 @@ function connectAndJoinAsViewer(code, passcode = null) {
     
     // Create new connection or use existing
     if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        // Show particle loader before connecting
+        const loader = getParticleLoader();
+        if (loader) loader.show();
+        
         // Create new WebSocket connection
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}`;
@@ -1278,6 +1302,9 @@ function connectAndJoinAsViewer(code, passcode = null) {
             wsConnected = true;
             reconnectAttempts = 0;
             updateStatusBars();
+            
+            // Hide loader on successful connection
+            if (loader) loader.hide();
             
             // Send join message once connected
             ws.send(JSON.stringify({
@@ -1302,6 +1329,7 @@ function connectAndJoinAsViewer(code, passcode = null) {
         
         ws.onerror = (error) => {
             console.error('WebSocket error:', error);
+            if (loader) loader.hide();
             showError('Connection error. Please refresh the page.');
         };
         
@@ -1309,6 +1337,7 @@ function connectAndJoinAsViewer(code, passcode = null) {
             console.log('WebSocket closed');
             wsConnected = false;
             updateStatusBars();
+            if (loader) loader.hide();
             
             if (currentRoom && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                 const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
