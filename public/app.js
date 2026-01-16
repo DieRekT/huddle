@@ -51,6 +51,7 @@ let liveNowTimer = null;
 // VAD (Voice Activity Detection) state - improved version
 let audioContext = null;
 let analyser = null;
+let gainNode = null; // Audio gain node for boosting mic signal (especially iPad/iOS)
 let vadInterval = null;
 const VAD_CHECK_MS = 80; // Update meter ~12.5 fps
 
@@ -3743,6 +3744,7 @@ async function startMic() {
         }
         // Enable autoGainControl for iPad/iOS to boost audio signal and improve detection
         // This helps compensate for lower microphone sensitivity on mobile devices
+        // Note: We also apply additional gain via Web Audio API gain node (see setupVAD)
         audioStream = await navigator.mediaDevices.getUserMedia({ 
             audio: {
                 channelCount: 1,
@@ -4043,10 +4045,18 @@ function setupVAD(stream) {
     audioContext = new (window.AudioContext || window.webkitAudioContext)();
     const source = audioContext.createMediaStreamSource(stream);
     
+    // Create gain node to boost audio signal (especially important for iPad/iOS)
+    gainNode = audioContext.createGain();
+    // Boost iPad/iOS audio by 4.0x (~12dB) to compensate for lower mic sensitivity
+    // Note: This affects VAD/meter detection. MediaRecorder uses autoGainControl for actual recording.
+    const audioGain = (isIPad || isIOS) ? 4.0 : 1.0;
+    gainNode.gain.value = audioGain;
+    source.connect(gainNode);
+    
     analyser = audioContext.createAnalyser();
     analyser.fftSize = 2048; // Better frequency resolution
     analyser.smoothingTimeConstant = 0.8;
-    source.connect(analyser);
+    gainNode.connect(analyser);
     
     const data = new Float32Array(analyser.fftSize);
     
@@ -4093,6 +4103,7 @@ function teardownVAD() {
     
     audioContext = null;
     analyser = null;
+    gainNode = null;
 }
 
 async function sendBlob(blob, mimeType, tsEnd, opts = {}) {
@@ -4285,13 +4296,15 @@ async function enableMicFromViewer() {
             return;
         }
         
+        // Enable autoGainControl for iPad/iOS to boost audio signal
+        // Additional gain is applied via Web Audio API gain node (see setupVAD)
         audioStream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 channelCount: 1,
                 sampleRate: 48000,
                 echoCancellation: false,
                 noiseSuppression: false,
-                autoGainControl: false
+                autoGainControl: isIPad || isIOS ? true : false // Enable for iPad/iOS to boost signal
             }
         });
         
