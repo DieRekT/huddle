@@ -2,6 +2,8 @@
 
 **Read the room.** Real-time transcription and AI-powered summaries for deaf and hard-of-hearing users.
 
+[![CI](https://github.com/DieRekT/huddle/actions/workflows/ci.yml/badge.svg)](https://github.com/DieRekT/huddle/actions/workflows/ci.yml)
+
 Huddle provides a unified, multi-location system where distributed microphones feed into a single room brain, delivering one calm, merged understanding to the viewer.
 
 ## Architecture
@@ -74,14 +76,18 @@ The server runs on `http://localhost:8787`
 2. Scan QR code with phone/iPad
 3. Device automatically opens mic page
 4. Enter name (auto-suggests device type: Phone/iPad/Laptop)
-5. Click **Join Room**
-6. Click **Start Mic** to begin streaming
+5. Enter room passcode if the room is protected (optional)
+6. Click **Join Room**
+7. Click **Start Mic** to begin streaming
 
 **Option B: Link**
 1. Viewer copies mic link from invite modal
 2. Share link with remote speakers
 3. Open link on any device
-4. Follow same join flow
+4. Enter room passcode if required
+5. Follow same join flow
+
+**Room Passcode Protection**: When creating a room, you can optionally add a 4-6 digit passcode to prevent unauthorized access. All participants must enter the correct passcode to join.
 
 ### 3. Viewer Experience
 
@@ -99,7 +105,12 @@ Click **Catch-up** button for a strong summary of the last 2 minutes.
 
 ### 5. Read the Room
 
-Click **Read the Room** button for a comprehensive overview of the entire conversation. This generates a full summary from all transcripts, providing key points and a complete overview of everything discussed.
+Click **Read the Room** button for a comprehensive overview of the entire conversation. This feature:
+- Generates a full summary from all transcripts with key points, decisions, and next steps
+- Uses intelligent chunking for long meetings (automatically splits transcripts into manageable segments)
+- Provides a "Copy" button to copy the complete summary to your clipboard
+- Shows segment count for multi-segment summaries
+- Displays decisions and next steps extracted from the entire conversation
 
 ### 6. Analyze Discussion Title
 
@@ -119,6 +130,24 @@ node tools/make_intro_tts.js
 ```
 
 This uses OpenAI TTS to generate `public/assets/intro.mp3`. The intro works without audio if the file is missing.
+
+### 8. Accessibility Features
+
+Huddle includes built-in accessibility features to support all users:
+
+- **Font Size Toggle**: Adjust text size between Normal, Large, and Extra Large (accessible via the menu)
+- **High Contrast Mode**: Enable high contrast colors for better visibility (WCAG AAA compliant)
+- **Keyboard Navigation**: Full keyboard support for all features
+- **Screen Reader Support**: ARIA labels and live regions for screen reader compatibility
+- **Focus Management**: Proper focus handling when panels open/close
+
+Accessibility preferences are saved in your browser and persist across sessions.
+
+### 9. Room Security
+
+- **Optional Passcode Protection**: Add a 4-6 digit passcode when creating a room
+- **Secure Room Access**: Only users with the correct passcode can join protected rooms
+- **Admin Controls**: Room creators have admin tokens for room management
 
 ## How It Works
 

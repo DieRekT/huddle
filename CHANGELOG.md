@@ -1,6 +1,49 @@
-# RoomBrief MVP - Changelog
+# Huddle - Changelog
 
-## Latest Update: Status Display Improvements & Bug Fixes
+## v1.0.0 - Full Room Overview & Accessibility (2025-01-17)
+
+### Major Features
+
+#### Full Room Overview Enhancements
+- ✅ **Chunked Summarization**: Automatically handles long meetings by splitting transcripts into manageable segments
+- ✅ **Extended Summary Output**: Now includes decisions and next_steps extracted from the entire conversation
+- ✅ **Copy Button**: One-click copy of complete summary (overview, key points, decisions, next steps)
+- ✅ **Segment Count Display**: Shows when summary was generated from multiple segments
+- ✅ **Hierarchical Summarization**: For very long meetings, summarizes chunks first, then synthesizes final summary
+
+#### Room Passcode Protection
+- ✅ **Optional Passcode**: Add 4-6 digit passcode when creating rooms
+- ✅ **Secure Joining**: All participants must enter correct passcode to join protected rooms
+- ✅ **UI Integration**: Passcode fields appear when creating/joining rooms
+
+#### Enhanced Accessibility
+- ✅ **Font Size Toggle**: Three sizes (Normal, Large, Extra Large) with localStorage persistence
+- ✅ **High Contrast Mode**: WCAG AAA compliant high contrast theme
+- ✅ **Screen Reader Improvements**: Enhanced ARIA labels and live regions
+- ✅ **Keyboard Navigation**: Full keyboard support throughout the app
+
+#### Standardized AI Prompts
+- ✅ **Consistent Prompt System**: All AI functions use standardized preamble
+- ✅ **Prompt Injection Guard**: Protection against malicious transcript content
+- ✅ **Improved Accuracy**: Better extraction of decisions and next steps
+
+### Technical Improvements
+- ✅ **Unit Tests**: Added tests for chunking functions, passcode validation
+- ✅ **Code Quality**: Standardized prompt helpers, improved error handling
+- ✅ **Documentation**: Comprehensive feature documentation
+
+### Files Modified
+- `server.js`: Chunked summarization, standardized prompts, passcode support
+- `public/app.js`: Full Room Overview UI, copy functionality, accessibility toggles
+- `public/viewer.html`, `public/index.html`: Enhanced UI structure, accessibility controls
+- `public/style.css`: Font size classes, high contrast styles
+- `test.js`: New test suites for chunking and validation
+
+---
+
+## Previous Updates
+
+## Status Display Improvements & Bug Fixes (2025-01-10)
 
 ### Status Display Enhancements (2025-01-10)
 - ✅ **Fixed**: Viewer now correctly shows mic activity status (was showing "waiting" even when mics active)

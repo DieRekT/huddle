@@ -91,13 +91,13 @@
 **AC**: Big start/stop; clear "Mic live" indicator; shows joined room code; minimal distractions.
 
 ### F3. Accessibility
-**Status**: ⚠️ Partial (MVP)
+**Status**: ✅ Complete (v1.0.0)
 **AC**: Large text option; high contrast; keyboard navigation (basic).
-**Notes**: Basic accessibility implemented. Enhanced features:
-- ⚠️ Font size toggle (to be implemented)
-- ⚠️ High contrast mode toggle (to be implemented)
+**Notes**: Full accessibility implementation:
+- ✅ Font size toggle (Normal, Large, Extra Large) with localStorage persistence
+- ✅ High contrast mode toggle (WCAG AAA compliant)
 - ✅ Basic keyboard navigation
-- ⚠️ Screen reader improvements (to be enhanced)
+- ✅ Enhanced screen reader support (ARIA labels, live regions)
 
 ---
 
@@ -122,14 +122,14 @@
 - ✅ Server auto-deletes rooms after TTL (ROOM_TTL_MS config)
 
 ### G3. Auth / room lock
-**Status**: ❌ Not Started
+**Status**: ✅ Complete (v1.0.0)
 **Priority**: Medium
 **AC**: Optional room passcode or one-time join token; prevents random joins.
 **Implementation Notes**:
-- Add optional passcode field when creating room
-- Require passcode on join
-- Or generate one-time join tokens (QR codes)
-- Consider simple PIN system (4-6 digits)
+- ✅ Optional passcode field when creating room (4-6 digits)
+- ✅ Require passcode on join (validated server-side)
+- ✅ UI integration in create/join flows
+- ✅ Passcode validation and error handling
 
 ### G4. HTTPS requirement note + recommended deployment
 **Status**: ✅ Documented (MVP)
@@ -147,7 +147,7 @@
 2. ✅ D1 + E1 (rolling summary + missed catch-up) - **DONE**
 3. ✅ D2/D3 (topic stability + lanes) - **DONE**
 4. ✅ G1 + G4 (consent + HTTPS deploy) - **DONE**
-5. ⚠️ F polish + G2/G3 (v1.0 readiness) - **G2 DONE, G3 TODO, F3 PARTIAL**
+5. ✅ F polish + G2/G3 (v1.0 readiness) - **ALL DONE**
 
 ---
 
@@ -155,12 +155,14 @@
 
 **Must-Have**:
 1. ✅ G1: Consent screen (before mic start + viewer banner) - **DONE**
-2. ⚠️ F3: Enhanced accessibility (font size, contrast toggle) - **IN PROGRESS**
+2. ✅ F3: Enhanced accessibility (font size, contrast toggle) - **DONE**
 
 **Nice-to-Have**:
 3. ✅ G2: Session export feature - **DONE**
-4. ⚠️ G3: Room passcode protection - **TODO**
+4. ✅ G3: Room passcode protection - **DONE**
 5. ✅ Enhanced error handling and reconnection logic - **DONE**
+
+**v1.0.0 Status**: ✅ **COMPLETE** - All planned features implemented
 
 **Future Considerations**:
 - Mobile apps (React Native / Flutter)
