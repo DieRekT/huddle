@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Huddle Wordmark Particle Form</title>
+  <style>
+    html, body { margin:0; height:100%; background:#0b1220; overflow:hidden; }
+    canvas { display:block; width:100vw; height:100vh; }
+    .ui {
+      position: fixed; top: 16px; left: 16px; right: 16px;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      color: rgba(233,238,252,.92);
+      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+      pointer-events:none;
+    }
+    .pill {
+      pointer-events:auto;
+      padding: 10px 12px; border-radius: 999px;
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.12);
+      box-shadow: 0 10px 30px rgba(0,0,0,.35);
+      font-size: 12px; font-weight: 750;
+      display:flex; gap:10px; align-items:center;
+      user-select:none;
+    }
+    .pill button {
+      pointer-events:auto;
+      border:0;
+      background: rgba(38,194,129,.14);
+      color: rgba(233,238,252,.95);
+      border: 1px solid rgba(38,194,129,.35);
+      padding: 7px 11px;
+      border-radius: 999px;
+      cursor: pointer;
+      font-weight: 800;
+    }
+    .pill button:hover { filter: brightness(1.05); }
+    .muted { opacity:.72; font-weight:650; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+
+  <div class="ui">
+    <div class="pill">
+      <span>HUDDLE particle wordmark</span>
+      <span class="muted">click: replay</span>
+      <button id="replay">Replay</button>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const canvas = document.getElementById("c");
+      const ctx = canvas.getContext("2d", { alpha: false });
+
+      const DPR = Math.min(2, window.devicePixelRatio || 1);
+      const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      // LOOK + FEEL
+      const BG = "#0b1220";
+      const DOT_BRIGHT = "rgba(233,238,252,0.92)";
+      const DOT_SOFT   = "rgba(233,238,252,0.30)";
+      const GLOW       = "rgba(38,194,129,0.26)";
+
+      // TUNING
+      const SETTINGS = {
+        imgSrc: "/assets/huddle-wordmark.png",
+        maxParticles: 2800,     // raise if you want more density
+        sampleStep: 4,          // lower = more points (heavier)
+        targetScale: 0.68,      // logo size relative to screen (0.55–0.85)
+        rMin: 0.7,
+        rMax: 2.0,
+        attract: 0.050,
+        swirl: 0.100,
+        damping: 0.86,
+        jitter: 0.013,
+        driftSeconds: 0.9,
+        settleSeconds: 2.4,
+      };
+
+      // Offscreen for sampling the PNG alpha mask
+      const off = document.createElement("canvas");
+      const offCtx = off.getContext("2d", { willReadFrequently: true });
+
+      let particles = [];
+      let targets = [];
+      let startTime = 0;
+
+      function resize() {
+        canvas.width  = Math.floor(window.innerWidth * DPR);
+        canvas.height = Math.floor(window.innerHeight * DPR);
+        ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      }
+
+      function rand(min, max) { return min + Math.random() * (max - min); }
+      function clamp01(v){ return Math.max(0, Math.min(1, v)); }
+      function easeOutCubic(t){ return 1 - Math.pow(1 - t, 3); }
+
+      function drawBackground() {
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+
+        ctx.fillStyle = BG;
+        ctx.fillRect(0, 0, w, h);
+
+        // subtle brand vignette/glow
+        const g = ctx.createRadialGradient(w * 0.5, h * 0.35, 60, w * 0.5, h * 0.35, Math.max(w, h));
+        g.addColorStop(0, "rgba(38,194,129,0.12)");
+        g.addColorStop(0.55, "rgba(38,194,129,0.03)");
+        g.addColorStop(1, "rgba(0,0,0,0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, w, h);
+      }
+
+      function makeTargetsFromImage(img) {
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+
+        off.width = w;
+        off.height = h;
+        offCtx.clearRect(0, 0, w, h);
+
+        // Fit logo to screen
+        const scale = SETTINGS.targetScale;
+        const maxW = w * scale;
+        const maxH = h * scale;
+
+        const s = Math.min(maxW / img.width, maxH / img.height);
+
+        const drawW = img.width * s;
+        const drawH = img.height * s;
+
+        const x0 = (w - drawW) / 2;
+        const y0 = (h - drawH) / 2;
+
+        // draw logo onto offscreen
+        offCtx.drawImage(img, x0, y0, drawW, drawH);
+
+        const data = offCtx.getImageData(0, 0, w, h).data;
+
+        const pts = [];
+        const step = SETTINGS.sampleStep;
+
+        // sample pixels where alpha > threshold (logo shape)
+        for (let y = 0; y < h; y += step) {
+          for (let x = 0; x < w; x += step) {
+            const i = (y * w + x) * 4;
+            const a = data[i + 3];
+            if (a > 25) {
+              pts.push({
+                x: x + (Math.random() - 0.5) * step * 0.6,
+                y: y + (Math.random() - 0.5) * step * 0.6
+              });
+            }
+          }
+        }
+
+        // cap particle count
+        if (pts.length > SETTINGS.maxParticles) {
+          for (let i = pts.length - 1; i > 0; i--) {
+            const j = (Math.random() * (i + 1)) | 0;
+            const t = pts[i]; pts[i] = pts[j]; pts[j] = t;
+          }
+          pts.length = SETTINGS.maxParticles;
+        }
+
+        return pts;
+      }
+
+      function spawnParticles() {
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+
+        particles = targets.map((t) => {
+          const x = Math.random() * w;
+          const y = Math.random() * h;
+          return {
+            x, y,
+            vx: rand(-0.6, 0.6),
+            vy: rand(-0.6, 0.6),
+            tx: t.x, ty: t.y,
+            r: rand(SETTINGS.rMin, SETTINGS.rMax),
+            spin: rand(0.6, 1.4) * (Math.random() < 0.5 ? -1 : 1),
+            phase: Math.random(),
+          };
+        });
+      }
+
+      function tick(ts) {
+        if (!startTime) startTime = ts;
+        const elapsed = (ts - startTime) / 1000;
+
+        drawBackground();
+
+        const driftT = SETTINGS.driftSeconds;
+        const settleT = SETTINGS.settleSeconds;
+
+        let form = 0;
+        if (elapsed <= driftT) form = 0;
+        else form = easeOutCubic(clamp01((elapsed - driftT) / settleT));
+        if (reduceMotion) form = 1;
+
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+
+        // glow behind logo as it forms
+        if (form > 0.06) {
+          ctx.save();
+          ctx.globalCompositeOperation = "lighter";
+          ctx.fillStyle = GLOW;
+          ctx.filter = "blur(16px)";
+          ctx.beginPath();
+          ctx.arc(w * 0.5, h * 0.54, 120 + form * 90, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+
+        for (let i = 0; i < particles.length; i++) {
+          const p = particles[i];
+
+          if (form === 0) {
+            p.vx += (Math.random() - 0.5) * SETTINGS.jitter;
+            p.vy += (Math.random() - 0.5) * SETTINGS.jitter;
+            p.x += p.vx;
+            p.y += p.vy;
+          } else {
+            const localForm = clamp01(form - p.phase * 0.22);
+
+            const dx = p.tx - p.x;
+            const dy = p.ty - p.y;
+
+            // attraction
+            p.vx += dx * SETTINGS.attract * localForm;
+            p.vy += dy * SETTINGS.attract * localForm;
+
+            // swirl (perpendicular)
+            p.vx += (-dy) * SETTINGS.swirl * localForm * p.spin * 0.010;
+            p.vy += ( dx) * SETTINGS.swirl * localForm * p.spin * 0.010;
+
+            // jitter fades as it settles
+            const jit = SETTINGS.jitter * (1 - localForm);
+            p.vx += (Math.random() - 0.5) * jit;
+            p.vy += (Math.random() - 0.5) * jit;
+
+            // damping increases as it settles
+            const damp = SETTINGS.damping + localForm * 0.10;
+            p.vx *= damp;
+            p.vy *= damp;
+
+            p.x += p.vx;
+            p.y += p.vy;
+          }
+
+          // screen wrap while drifting
+          if (p.x < -10) p.x = w + 10;
+          if (p.x > w + 10) p.x = -10;
+          if (p.y < -10) p.y = h + 10;
+          if (p.y > h + 10) p.y = -10;
+
+          const alpha = 0.18 + form * 0.82;
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = form > 0.12 ? DOT_BRIGHT : DOT_SOFT;
+
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        requestAnimationFrame(tick);
+      }
+
+      let img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => start();
+
+      function start() {
+        resize();
+        targets = makeTargetsFromImage(img);
+        spawnParticles();
+        startTime = 0;
+      }
+
+      img.onerror = () => {
+        console.error("Failed to load logo image:", SETTINGS.imgSrc);
+        document.body.innerHTML = '<div style="color:white;padding:2rem;text-align:center;">Logo image not found. Please add /assets/huddle-wordmark.png</div>';
+      };
+
+      img.src = SETTINGS.imgSrc;
+
+      document.getElementById("replay").addEventListener("click", start);
+      canvas.addEventListener("click", start);
+      window.addEventListener("resize", start);
+
+      requestAnimationFrame(tick);
+    })();
+  </script>
+</body>
+</html>
+

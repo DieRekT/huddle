@@ -1,6 +1,6 @@
 /* public/assets/huddle_loader_particles.js
 
-   Fullscreen canvas loader: particles swirl inward to form "HUDDLE".
+   Fullscreen canvas loader: particles swirl inward to form the HUDDLE wordmark logo.
 
    Usage:
 
@@ -31,19 +31,20 @@
 
   function mount(options = {}) {
     const opts = {
-      text: "HUDDLE",
+      imgSrc: "/assets/huddle-wordmark.png",
       brand: "#26c281",
       bg: "#0b1220",
-      maxParticles: 2200,
-      sampleStep: 5,
+      maxParticles: 2800,
+      sampleStep: 4,
+      targetScale: 0.68,
       rMin: 0.7,
       rMax: 2.0,
-      attract: 0.040,
-      swirl: 0.090,
-      damping: 0.88,
-      jitter: 0.012,
-      driftSeconds: 0.8,
-      settleSeconds: 2.2,
+      attract: 0.050,
+      swirl: 0.100,
+      damping: 0.86,
+      jitter: 0.013,
+      driftSeconds: 0.9,
+      settleSeconds: 2.4,
       ...options,
     };
 
@@ -61,7 +62,7 @@
     const skipBtn = createEl("button", { class: "huddle-loader-skip" }, pill);
     skipBtn.textContent = "Skip";
 
-    // Offscreen for text sampling
+    // Offscreen for image sampling
     const off = document.createElement("canvas");
     const offCtx = off.getContext("2d", { willReadFrequently: true });
 
@@ -72,6 +73,8 @@
     let raf = 0;
     let visible = false;
     let doneOnce = false;
+    let img = null;
+    let imgLoaded = false;
 
     function resize() {
       DPR = Math.min(2, window.devicePixelRatio || 1);
@@ -82,45 +85,69 @@
       ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     }
 
+    function loadImage() {
+      if (imgLoaded || img) return Promise.resolve();
+      return new Promise((resolve, reject) => {
+        img = new Image();
+        img.crossOrigin = "anonymous";
+        img.onload = () => {
+          imgLoaded = true;
+          resolve();
+        };
+        img.onerror = () => {
+          console.error("Failed to load wordmark image:", opts.imgSrc);
+          reject(new Error("Image load failed"));
+        };
+        img.src = opts.imgSrc;
+      });
+    }
+
     function makeTargets() {
+      if (!imgLoaded || !img) return [];
+
       const w = window.innerWidth;
       const h = window.innerHeight;
 
-      off.width = Math.floor(w);
-      off.height = Math.floor(h);
-
+      off.width = w;
+      off.height = h;
       offCtx.clearRect(0, 0, w, h);
 
-      const fontSize = Math.max(72, Math.min(190, Math.floor(w * 0.16)));
-      offCtx.font = `800 ${fontSize}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial`;
-      offCtx.textAlign = "center";
-      offCtx.textBaseline = "middle";
+      // Fit logo to screen
+      const scale = opts.targetScale;
+      const maxW = w * scale;
+      const maxH = h * scale;
 
-      // Soft glow pass
-      offCtx.fillStyle = "rgba(38,194,129,0.18)";
-      offCtx.fillText(opts.text, w / 2, h / 2 + 2);
+      const s = Math.min(maxW / img.width, maxH / img.height);
 
-      // Solid mask pass
-      offCtx.fillStyle = "rgba(255,255,255,1)";
-      offCtx.fillText(opts.text, w / 2, h / 2);
+      const drawW = img.width * s;
+      const drawH = img.height * s;
 
-      const img = offCtx.getImageData(0, 0, w, h).data;
+      const x0 = (w - drawW) / 2;
+      const y0 = (h - drawH) / 2;
+
+      // draw logo onto offscreen
+      offCtx.drawImage(img, x0, y0, drawW, drawH);
+
+      const data = offCtx.getImageData(0, 0, w, h).data;
+
       const pts = [];
       const step = opts.sampleStep;
 
+      // sample pixels where alpha > threshold (logo shape)
       for (let y = 0; y < h; y += step) {
         for (let x = 0; x < w; x += step) {
           const i = (y * w + x) * 4;
-          const a = img[i + 3];
-          if (a > 10) {
+          const a = data[i + 3];
+          if (a > 25) {
             pts.push({
               x: x + (Math.random() - 0.5) * step * 0.6,
-              y: y + (Math.random() - 0.5) * step * 0.6,
+              y: y + (Math.random() - 0.5) * step * 0.6
             });
           }
         }
       }
 
+      // cap particle count
       if (pts.length > opts.maxParticles) {
         for (let i = pts.length - 1; i > 0; i--) {
           const j = (Math.random() * (i + 1)) | 0;
@@ -142,8 +169,8 @@
 
         return {
           x, y,
-          vx: rand(-0.5, 0.5),
-          vy: rand(-0.5, 0.5),
+          vx: rand(-0.6, 0.6),
+          vy: rand(-0.6, 0.6),
           tx: t.x, ty: t.y,
           r: rand(opts.rMin, opts.rMax),
           spin: rand(0.6, 1.4) * (Math.random() < 0.5 ? -1 : 1),
@@ -193,14 +220,14 @@
         doneOnce = true;
       }
 
-      // behind-word glow as it forms
+      // behind-wordmark glow as it forms
       if (form > 0.06) {
         ctx.save();
         ctx.globalCompositeOperation = "lighter";
-        ctx.fillStyle = "rgba(38,194,129,0.28)";
+        ctx.fillStyle = "rgba(38,194,129,0.26)";
         ctx.filter = "blur(16px)";
         ctx.beginPath();
-        ctx.arc(w * 0.5, h * 0.5, 120 + form * 80, 0, Math.PI * 2);
+        ctx.arc(w * 0.5, h * 0.54, 120 + form * 90, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
       }
@@ -223,8 +250,8 @@
           p.vy += dy * opts.attract * localForm;
 
           // swirl
-          p.vx += (-dy) * opts.swirl * localForm * p.spin * 0.012;
-          p.vy += ( dx) * opts.swirl * localForm * p.spin * 0.012;
+          p.vx += (-dy) * opts.swirl * localForm * p.spin * 0.010;
+          p.vy += ( dx) * opts.swirl * localForm * p.spin * 0.010;
 
           const jit = opts.jitter * (1 - localForm);
           p.vx += (Math.random() - 0.5) * jit;
@@ -246,7 +273,7 @@
 
         const alpha = 0.18 + form * 0.82;
         ctx.globalAlpha = alpha;
-        ctx.fillStyle = form > 0.15 ? "rgba(233,238,252,0.92)" : "rgba(233,238,252,0.35)";
+        ctx.fillStyle = form > 0.12 ? "rgba(233,238,252,0.92)" : "rgba(233,238,252,0.30)";
 
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
@@ -258,19 +285,30 @@
 
     function resetSim() {
       resize();
-      targets = makeTargets();
-      spawnParticles();
+      if (imgLoaded) {
+        targets = makeTargets();
+        spawnParticles();
+      }
       startTime = 0;
       doneOnce = false;
     }
 
     function show() {
       if (visible) return;
-      visible = true;
-      root.classList.add("is-visible");
-      resetSim();
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(tick);
+      
+      // Load image if not already loaded
+      loadImage().then(() => {
+        visible = true;
+        root.classList.add("is-visible");
+        resetSim();
+        cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(tick);
+      }).catch((err) => {
+        console.error("Failed to show loader:", err);
+        // Still show even if image fails (fallback)
+        visible = true;
+        root.classList.add("is-visible");
+      });
     }
 
     function hide() {
@@ -304,6 +342,11 @@
 
     window.addEventListener("resize", onResize);
 
+    // Preload image on mount
+    loadImage().catch(() => {
+      // Silent fail, will retry on show()
+    });
+
     // start hidden
     hide();
 
@@ -312,4 +355,3 @@
 
   window.HuddleParticleLoader = { mount };
 })();
-
