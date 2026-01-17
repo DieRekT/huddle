@@ -309,7 +309,57 @@
       }
 
       // Apply flocking behavior for bird-like cloud movement
-      applyFlocking(particles, form);
+      // Only apply flocking during drift phase (form === 0) for natural cloud movement
+      if (form === 0 && particles.length > 0) {
+        for (let i = 0; i < particles.length; i++) {
+          const p = particles[i];
+          let cohesionX = 0, cohesionY = 0;
+          let alignmentX = 0, alignmentY = 0;
+          let separationX = 0, separationY = 0;
+          let neighborCount = 0;
+
+          // Check neighbors within flock radius
+          for (let j = 0; j < particles.length; j++) {
+            if (i === j) continue;
+            const other = particles[j];
+            const dx = other.x - p.x;
+            const dy = other.y - p.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+
+            if (dist < opts.flockRadius && dist > 0) {
+              neighborCount++;
+              
+              // Cohesion: steer toward average position of neighbors
+              cohesionX += other.x;
+              cohesionY += other.y;
+              
+              // Alignment: steer toward average velocity of neighbors
+              alignmentX += other.vx;
+              alignmentY += other.vy;
+              
+              // Separation: steer away from neighbors (avoid crowding)
+              separationX -= dx / dist;
+              separationY -= dy / dist;
+            }
+          }
+
+          // Apply flocking forces (weighted average)
+          if (neighborCount > 0) {
+            cohesionX = (cohesionX / neighborCount - p.x) * opts.flockCohesion;
+            cohesionY = (cohesionY / neighborCount - p.y) * opts.flockCohesion;
+            
+            alignmentX = (alignmentX / neighborCount - p.vx) * opts.flockAlignment;
+            alignmentY = (alignmentY / neighborCount - p.vy) * opts.flockAlignment;
+            
+            separationX = separationX * opts.flockSeparation;
+            separationY = separationY * opts.flockSeparation;
+            
+            // Apply forces to velocity
+            p.vx += cohesionX + alignmentX + separationX;
+            p.vy += cohesionY + alignmentY + separationY;
+          }
+        }
+      }
       
       for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
