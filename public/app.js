@@ -3790,6 +3790,7 @@ async function startMic() {
                 if (micIndicator) micIndicator.style.display = 'inline-flex';
                 if (micFeedback) micFeedback.style.display = 'block';
                 if (micStats) micStats.style.display = 'block';
+                if (micTranscriptCard) micTranscriptCard.style.display = 'block'; // Show transcript card when mic starts
                 updateMicIconState('recording');
                 chunksSent = 0;
                 chunksAcked = 0;
@@ -3912,6 +3913,7 @@ async function startMic() {
         if (micIndicator) micIndicator.style.display = 'inline-flex';
         if (micFeedback) micFeedback.style.display = 'block';
         if (micStats) micStats.style.display = 'block';
+        if (micTranscriptCard) micTranscriptCard.style.display = 'block'; // Show transcript card when mic starts
         updateMicIconState('recording');
         chunksSent = 0;
         chunksAcked = 0;
