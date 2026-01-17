@@ -1878,6 +1878,9 @@ wss.on('connection', (ws) => {
           const b64 = message.data;
           const mime = String(message.mime || 'audio/webm');
           const speaker = client.name;
+          const micId = client.micId || clientId;
+          
+          logger.debug(`[${room.code}] Received audio_chunk from ${speaker} (micId: ${micId})`);
 
           if (!b64 || typeof b64 !== 'string') {
             logger.warn(`[${room.code}] Invalid audio chunk data from ${speaker}`);

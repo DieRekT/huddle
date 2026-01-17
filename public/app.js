@@ -1576,12 +1576,18 @@ function connectAndJoin(code, passcode = null) {
     // Check if WebSocket is already connected
     if (ws && ws.readyState === WebSocket.OPEN) {
         // Already connected, send message immediately
+        const micLabel = detectDeviceLabel();
+        const uniqueName = userName ? `${userName} (${micLabel})` : micLabel;
+        const micId = `mic-${deviceId}`;
+        console.log(`[Mic] Joining as ${uniqueName} with micId ${micId}`);
         ws.send(JSON.stringify({
             type: 'join',
             roomCode: code,
             role: 'mic',
-            name: userName,
+            name: uniqueName,
             deviceId: deviceId,
+            micId: micId,
+            label: micLabel,
             passcode: passcode
         }));
         return;
@@ -1610,12 +1616,18 @@ function connectAndJoin(code, passcode = null) {
             hideLoaderMinDelay();
             
             // Send join message once connected
+            const micLabel = detectDeviceLabel();
+            const uniqueName = userName ? `${userName} (${micLabel})` : micLabel;
+            const micId = `mic-${deviceId}`;
+            console.log(`[Mic] Joining as ${uniqueName} with micId ${micId}`);
             ws.send(JSON.stringify({
                 type: 'join',
                 roomCode: code,
                 role: 'mic',
-                name: userName,
+                name: uniqueName,
                 deviceId: deviceId,
+                micId: micId,
+                label: micLabel,
                 passcode: passcode
             }));
         };
@@ -1670,12 +1682,18 @@ function connectAndJoin(code, passcode = null) {
             if (originalOnOpen) originalOnOpen();
             hideLoaderMinDelay();
             if (ws.readyState === WebSocket.OPEN) {
+                const micLabel = detectDeviceLabel();
+                const uniqueName = userName ? `${userName} (${micLabel})` : micLabel;
+                const micId = `mic-${deviceId}`;
+                console.log(`[Mic] Joining as ${uniqueName} with micId ${micId}`);
                 ws.send(JSON.stringify({
                     type: 'join',
                     roomCode: code,
                     role: 'mic',
-                    name: userName,
+                    name: uniqueName,
                     deviceId: deviceId,
+                    micId: micId,
+                    label: micLabel,
                     passcode: passcode
                 }));
             }
@@ -4110,13 +4128,21 @@ async function sendBlob(blob, mimeType, tsEnd, opts = {}) {
     // Use micWs if mic is enabled (viewer→mic opt-in), otherwise use ws
     const targetWs = (isMicEnabled && micWs && micWs.readyState === WebSocket.OPEN) ? micWs : ws;
     if (!targetWs || targetWs.readyState !== WebSocket.OPEN) {
-        console.warn('WebSocket not connected, cannot send audio');
+        console.warn('[Audio] WebSocket not connected, cannot send audio');
         return;
     }
     
     try {
         const base64 = await blobToBase64(blob);
-        console.log('Sending audio chunk, size:', base64.length, 'mime:', mimeType, 'rms:', vadRms.toFixed(3));
+        const deviceLabel = detectDeviceLabel();
+        const micType = isMicEnabled ? 'viewer-mic' : 'dedicated-mic';
+        console.log(`[Audio] Sending chunk from ${deviceLabel} (${micType}):`, {
+            size: base64.length,
+            blobSize: blob.size,
+            mime: mimeType,
+            rms: vadRms?.toFixed(3) || 'N/A',
+            muted: isMicMuted
+        });
         
         const payload = {
             type: 'audio_chunk',
@@ -4125,7 +4151,10 @@ async function sendBlob(blob, mimeType, tsEnd, opts = {}) {
             tsEnd: tsEnd
         };
 
-        if (opts.init) payload.init = true;
+        if (opts.init) {
+            payload.init = true;
+            console.log(`[Audio] Sending init chunk from ${deviceLabel}`);
+        }
 
         targetWs.send(JSON.stringify(payload));
         
@@ -4134,7 +4163,7 @@ async function sendBlob(blob, mimeType, tsEnd, opts = {}) {
         updateMicStats();
         if (isMicEnabled) updateRoleModuleMicStatus();
     } catch (err) {
-        console.error('Error sending audio chunk:', err);
+        console.error('[Audio] Error sending audio chunk:', err);
         showToast('Error reading audio data', 'error');
     }
 }
@@ -4319,12 +4348,15 @@ async function enableMicFromViewer() {
             // Join as mic with deviceId
             const micId = `mic-${deviceId}`;
             const micLabel = detectDeviceLabel();
+            // Use device label in name to ensure unique speaker names for each device
+            const uniqueName = userName ? `${userName} (${micLabel})` : micLabel;
             const passcode = getRoomPasscode(currentRoom);
+            console.log(`[Mic] Joining as ${uniqueName} with micId ${micId}`);
             micWs.send(JSON.stringify({
                 type: 'join',
                 roomCode: currentRoom,
                 role: 'mic',
-                name: userName,
+                name: uniqueName,
                 deviceId: deviceId,
                 micId: micId,
                 label: micLabel,
