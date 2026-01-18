@@ -1662,13 +1662,19 @@ function connectAndJoinAsViewer(code, passcode = null) {
         };
         
         ws.onerror = (error) => {
-            console.error('WebSocket error:', error);
+            console.error('[Diagnostic] WebSocket error:', { error, wsUrl, readyState: ws?.readyState, roomCode: code });
             hideLoaderMinDelay();
             showError('Connection error. Please refresh the page.');
         };
         
-        ws.onclose = () => {
-            console.log('WebSocket closed');
+        ws.onclose = (event) => {
+            console.log('[Diagnostic] WebSocket closed:', { 
+                code: event.code, 
+                reason: event.reason, 
+                wasClean: event.wasClean,
+                wsUrl,
+                roomCode: code 
+            });
             wsConnected = false;
             updateStatusBars();
             hideLoaderMinDelay();
@@ -1681,7 +1687,7 @@ function connectAndJoinAsViewer(code, passcode = null) {
                 const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
                 reconnectAttempts++;
                 
-                console.log(`Attempting to reconnect (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) in ${delay}ms...`);
+                console.log(`[Diagnostic] Attempting to reconnect (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) in ${delay}ms...`);
                 
                 setTimeout(() => {
                     if (currentRole === 'viewer' && currentRoom) {
