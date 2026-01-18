@@ -1,3 +1,80 @@
+// === Multi-mic reliability improvements (2026-01) ===
+const HEARTBEAT_INTERVAL_MS = 3000;
+let micHeartbeatTimer = null;
+let micStreaming = false;
+let micPaused = false;
+
+function getStableDeviceId(key = 'huddle_device_id') {
+  try {
+    let id = localStorage.getItem(key);
+    if (!id) {
+      id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : ('dev_' + Math.random().toString(16).slice(2));
+      localStorage.setItem(key, id);
+    }
+    return id;
+  } catch (e) {
+    return 'dev_' + Math.random().toString(16).slice(2);
+  }
+}
+
+function getMicDisplayName() {
+  const ua = navigator.userAgent || '';
+  const isIPad = /iPad/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isIPhone = /iPhone/.test(ua);
+  const isAndroid = /Android/.test(ua);
+  if (isIPad) return 'iPad Mic';
+  if (isIPhone) return 'iPhone Mic';
+  if (isAndroid) return 'Android Mic';
+  return 'Browser Mic';
+}
+
+function safeSend(ws, obj) {
+  try {
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify(obj));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+const micDeviceId = getStableDeviceId();
+
+function startMicHeartbeat(ws, roomCode) {
+  stopMicHeartbeat();
+  const name = getMicDisplayName();
+
+  const tick = () => {
+    safeSend(ws, {
+      type: 'mic_heartbeat',
+      roomCode,
+      deviceId: micDeviceId,
+      name,
+      streaming: !!micStreaming,
+      paused: !!micPaused,
+      tsMs: Date.now()
+    });
+  };
+
+  tick();
+  micHeartbeatTimer = setInterval(tick, HEARTBEAT_INTERVAL_MS);
+}
+
+function stopMicHeartbeat() {
+  if (micHeartbeatTimer) {
+    clearInterval(micHeartbeatTimer);
+    micHeartbeatTimer = null;
+  }
+}
+
+// Visibility: iOS/Android will pause mic in background/lock.
+document.addEventListener('visibilitychange', () => {
+  micPaused = document.visibilityState !== 'visible';
+});
+window.addEventListener('pagehide', () => { micPaused = true; });
+window.addEventListener('pageshow', () => { micPaused = document.visibilityState !== 'visible'; });
+
+
 // WebSocket connections (dual support: viewer + mic)
 let ws = null; // Viewer WebSocket (primary)
 let micWs = null; // Mic WebSocket (optional, when viewer enables mic)
@@ -717,11 +794,21 @@ async function loadActiveRooms() {
 }
 
 // Initialize intro screen if it exists
+// BUT: Skip intro if we're on a specific route (/viewer, /mic, /host)
 let routeInfo = null;
-if (introScreen) {
+const pathname = window.location.pathname;
+const shouldSkipIntro = pathname === '/viewer' || pathname === '/mic' || pathname === '/host';
+
+if (introScreen && !shouldSkipIntro) {
+    // Show intro only on / (root) or other non-route pages
     initializeIntroScreen();
 } else {
-    // No intro screen, proceed with normal flow
+    // No intro screen OR we're on a route that should skip intro
+    if (introScreen && shouldSkipIntro) {
+        // Hide intro screen if we're on a route page
+        introScreen.classList.remove('active');
+    }
+    // Proceed with normal route detection
     routeInfo = detectRouteAndInit();
 }
 
@@ -1630,6 +1717,10 @@ function connectAndJoin(code, passcode = null) {
                 label: micLabel,
                 passcode: passcode
             }));
+            // Start heartbeat for mic role (start after join is sent)
+            if (currentRole === 'mic') {
+                startMicHeartbeat(ws, code);
+            }
         };
         
         ws.onmessage = (event) => {
@@ -1657,6 +1748,7 @@ function connectAndJoin(code, passcode = null) {
             wsConnected = false;
             updateStatusBars();
             hideLoaderMinDelay();
+            stopMicHeartbeat();
             
             if (currentRoom && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                 const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
@@ -1849,6 +1941,13 @@ function handleMessage(message) {
             showMissedResult(message);
             break;
 
+        case 'device_list':
+            // Update device list UI from heartbeat-driven device registry
+            if (message.devices && Array.isArray(message.devices)) {
+                updateDeviceListUI(message.devices);
+            }
+            break;
+            
         case 'read_room_result':
             // If this is from a Save & Clear operation, format and copy to clipboard
             if (saveClearPending) {
@@ -2693,6 +2792,36 @@ function updateActionsCard(actions) {
             actionsList.appendChild(li);
         });
     }
+}
+
+// Update device list UI from heartbeat-driven device_list message
+function updateDeviceListUI(devices) {
+    if (!micHealthList) return;
+    
+    if (!devices || devices.length === 0) {
+        updateMicHealthStrip([]);
+        return;
+    }
+    
+    // Map device status (LIVE/CONNECTED/PAUSED/OFFLINE) to mic roster format for compatibility
+    const micRoster = devices.map(dev => {
+        const status = dev.status || 'OFFLINE';
+        // Map heartbeat status to legacy status format
+        let legacyStatus = 'quiet';
+        if (status === 'LIVE') legacyStatus = 'live';
+        else if (status === 'CONNECTED' || status === 'PAUSED') legacyStatus = 'sending';
+        else legacyStatus = 'offline';
+        
+        return {
+            name: dev.name,
+            status: legacyStatus,
+            streaming: dev.streaming,
+            lastActivity: dev.lastSeen || Date.now()
+        };
+    });
+    
+    // Use existing updateMicHealthStrip for rendering (already handles status chips)
+    updateMicHealthStrip(micRoster);
 }
 
 // Update mic health indicator strip (replaces old mic roster card)
@@ -3758,7 +3887,21 @@ async function startMic() {
     try {
         // Check if mediaDevices is available (Safari compatibility)
         if (!navigator || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            throw new Error('Microphone access not available in this browser');
+            const protocol = window.location.protocol;
+            const hostname = window.location.hostname;
+            const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1';
+            const isHTTPS = protocol === 'https:';
+            
+            let errorMsg = 'Microphone access requires HTTPS. ';
+            if (!isHTTPS && !isLocalhost) {
+                errorMsg += 'Please use HTTPS or access via localhost. ';
+                if (hostname.includes('192.168.') || hostname.includes('10.') || hostname.includes('172.')) {
+                    errorMsg += 'For local IP addresses, use Cloudflare tunnel (cloudflared tunnel --url http://localhost:8787) or access via localhost.';
+                }
+            } else {
+                errorMsg += 'Your browser may not support microphone access or it is disabled.';
+            }
+            throw new Error(errorMsg);
         }
         // Enable autoGainControl for iPad/iOS to boost audio signal and improve detection
         // This helps compensate for lower microphone sensitivity on mobile devices
@@ -3783,6 +3926,7 @@ async function startMic() {
                 realtimeMicInitialized = true;
                 await window.RealtimeMic.start();
                 useRealtimeMode = true;
+                micStreaming = true;
                 
                 startMicBtn.style.display = 'none';
                 stopMicBtn.style.display = 'block';
@@ -3894,6 +4038,7 @@ async function startMic() {
         
         // Record in ~5s chunks for better phoneme continuity and word boundaries - VAD filters silence so cost stays low
         mediaRecorder.start(TIMESLICE_MS);
+        micStreaming = true;
         
         console.log('MediaRecorder started, state:', mediaRecorder.state);
         console.log('Audio stream active:', audioStream.active);
@@ -4031,6 +4176,7 @@ function stopMic() {
             mediaRecorder.stop();
         }
     }
+    micStreaming = false;
     
     if (audioStream) {
         audioStream.getTracks().forEach(track => {
@@ -4364,6 +4510,8 @@ async function enableMicFromViewer() {
                 label: micLabel,
                 passcode: passcode
             }));
+            // Start heartbeat after join
+            startMicHeartbeat(micWs, currentRoom);
         };
         
         micWs.onmessage = (event) => {
@@ -4391,6 +4539,7 @@ async function enableMicFromViewer() {
         
         micWs.onclose = () => {
             console.log('Mic WebSocket closed');
+            stopMicHeartbeat();
             if (isMicEnabled) {
                 // Reconnect if mic is still enabled
                 setTimeout(() => {
@@ -4506,6 +4655,7 @@ async function startMicFromViewer() {
         
         mediaRecorder.start(TIMESLICE_MS);
         setupVAD(audioStream);
+        micStreaming = true;
         
         isMicEnabled = true;
         isMicMuted = false;

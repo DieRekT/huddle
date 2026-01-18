@@ -225,20 +225,134 @@ function isGarbageTranscript(text) {
   return false;
 }
 
-function normalizeText(s) {
-  return String(s || '').replace(/\s+/g, ' ').trim();
+function similarTranscript(a, b) {
+  const ta = normalizeText(a || "");
+  const tb = normalizeText(b || "");
+  if (!ta || !tb) return false;
+  if (ta === tb) return true;
+  if (ta.length >= 14 && (ta.includes(tb) || tb.includes(ta))) return true;
+  const sim = combinedSimilarity(ta, tb);
+  return sim >= 0.90;
 }
 
-function similarTranscript(a, b) {
-  if (!a || !b) return false;
-  const x = normalizeText(a.text).toLowerCase();
-  const y = normalizeText(b.text).toLowerCase();
-  if (!x || !y) return false;
-  if (x === y) return true;
-  // Avoid over-aggressive merging on very short utterances (e.g., "yes", "ok")
-  if (x.length < 12 || y.length < 12) return false;
-  return x.includes(y) || y.includes(x);
+// === Multi-mic reliability improvements (2026-01) ===
+const DEDUP_WINDOW_MS = 1200;
+const HEARTBEAT_TTL_MS = 12000; // OFFLINE if no heartbeat within this window
+const HEARTBEAT_INTERVAL_HINT_MS = 3000;
+
+function clamp01(n){ return Math.max(0, Math.min(1, n)); }
+function nowMs(){ return Date.now(); }
+
+function normalizeText(s){
+  return (s || "")
+    .toLowerCase()
+    .replace(/[\u2019']/g, "'")
+    .replace(/[^a-z0-9\s']/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
+
+function tokenize(s){
+  const t = normalizeText(s);
+  return t ? t.split(" ") : [];
+}
+
+function jaccardSimilarity(a,b){
+  const A = new Set(tokenize(a));
+  const B = new Set(tokenize(b));
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter++;
+  const uni = A.size + B.size - inter;
+  return uni ? inter/uni : 0;
+}
+
+// Jaro-Winkler (no deps)
+function jaroWinkler(a,b){
+  a = normalizeText(a); b = normalizeText(b);
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const al=a.length, bl=b.length;
+  const matchDist = Math.floor(Math.max(al, bl)/2) - 1;
+  const aM = new Array(al).fill(false);
+  const bM = new Array(bl).fill(false);
+  let matches = 0;
+
+  for (let i=0;i<al;i++){
+    const start = Math.max(0, i - matchDist);
+    const end = Math.min(i + matchDist + 1, bl);
+    for (let j=start;j<end;j++){
+      if (bM[j]) continue;
+      if (a[i] !== b[j]) continue;
+      aM[i]=true; bM[j]=true; matches++; break;
+    }
+  }
+  if (!matches) return 0;
+
+  let t=0, k=0;
+  for (let i=0;i<al;i++){
+    if (!aM[i]) continue;
+    while (!bM[k]) k++;
+    if (a[i] !== b[k]) t++;
+    k++;
+  }
+  t /= 2;
+
+  const m = matches;
+  const jaro = (m/al + m/bl + (m - t)/m) / 3;
+
+  let prefix=0;
+  for (let i=0;i<Math.min(4, al, bl);i++){
+    if (a[i]===b[i]) prefix++;
+    else break;
+  }
+  const p = 0.1;
+  return jaro + prefix*p*(1-jaro);
+}
+
+function combinedSimilarity(a,b){
+  const jw = jaroWinkler(a,b);
+  const jac = jaccardSimilarity(a,b);
+  return 0.65*jw + 0.35*jac;
+}
+
+function upsertMicDevice(room, deviceId, patch){
+  if (!room.activeMics) room.activeMics = new Map();
+  const prev = room.activeMics.get(deviceId) || {};
+  const merged = { ...prev, ...patch };
+  room.activeMics.set(deviceId, merged);
+  return merged;
+}
+
+function computeDeviceStatus(dev){
+  const ts = nowMs();
+  const hb = dev.heartbeatTs || 0;
+  if (dev.paused) return "PAUSED";
+  if (hb && (ts - hb) <= HEARTBEAT_TTL_MS) return dev.streaming ? "LIVE" : "CONNECTED";
+  return "OFFLINE";
+}
+
+function buildDeviceList(room){
+  const devices = [];
+  if (room.activeMics && room.activeMics.size){
+    for (const [deviceId, dev] of room.activeMics.entries()){
+      const lastSeen = dev.heartbeatTs || dev.lastActivity || dev.connectedAt || 0;
+      devices.push({
+        deviceId,
+        name: dev.name || "Mic",
+        status: computeDeviceStatus(dev),
+        streaming: !!dev.streaming,
+        paused: !!dev.paused,
+        lastSeen
+      });
+    }
+  }
+  const rank = { LIVE:0, CONNECTED:1, PAUSED:2, OFFLINE:3 };
+  devices.sort((a,b) => (rank[a.status]-rank[b.status]) || (b.lastSeen-a.lastSeen));
+  return devices;
+}
+
+
 
 function buildMicPrompt(priorTranscript) {
   const prefix =
@@ -538,11 +652,61 @@ class Room {
     this.promptByMic = new Map(); // micKey (clientId) -> rolling transcript context
     this.topicHistory = []; // [{ ts, fromTopic, toTopic, confidence, fromSubtopic, toSubtopic, fromStatus, toStatus, source }]
     this.topicSummaryCache = new Map(); // key -> { summary, key_points, createdAt, startTs, endTs }
+    // Segment-based topic timeline: [{ startMs, endMs, topic, updatedAt }]
+    this.topicTimeline = [];
+    this._lastTopicSegmentStartMs = this.createdAt;
     // Multi-location architecture: track active mics
     // lastActivity: last time server received *any* audio payload (or transcript)
     // lastTranscript: last time a transcript was successfully produced (indicates "heard")
-    this.activeMics = new Map(); // micId -> { clientId, name, status, lastActivity, connectedAt, lastTranscript }
+    this.activeMics = new Map(); // micId -> { clientId, name, status, lastActivity, connectedAt, lastTranscript, streaming, heartbeatTs, paused }
     this.micHealthTimer = null; // Timer to update mic health status
+  }
+
+  // Ensure there is a current topic segment to write into
+  ensureTopicSegment(tsMs) {
+    if (!this._lastTopicSegmentStartMs) this._lastTopicSegmentStartMs = this.createdAt;
+    const segStart = this._lastTopicSegmentStartMs;
+    const TOPIC_SEGMENT_MS = 90000; // 1.5 min topic segments
+    if (tsMs - segStart < TOPIC_SEGMENT_MS && this.topicTimeline.length) return;
+    // start new segment
+    this._lastTopicSegmentStartMs = tsMs;
+    this.topicTimeline.push({
+      startMs: tsMs,
+      endMs: tsMs,
+      topic: '',
+      updatedAt: tsMs,
+    });
+  }
+
+  updateTopicForTimestamp(tsMs, topic) {
+    if (!topic) return;
+    this.ensureTopicSegment(tsMs);
+    const seg = this.topicTimeline[this.topicTimeline.length - 1];
+    if (seg) {
+      seg.endMs = Math.max(seg.endMs, tsMs);
+      seg.topic = topic;
+      seg.updatedAt = nowMs();
+    }
+  }
+
+  // Coverage-based confidence for "room.summary.confidence"
+  computeConfidence(tsMs) {
+    // Confidence depends on: active transcript density + low-duplication
+    const CONF_WINDOW_MS = 120000; // 2 min confidence window
+    const windowStart = tsMs - CONF_WINDOW_MS;
+    const items = (this.transcripts || []).filter(t => (t.ts || t.tsMs || 0) >= windowStart);
+    if (items.length === 0) return 0.1;
+    const withText = items.filter(t => normalizeText(t.text).length >= 8);
+    const coverage = withText.length / items.length;
+    // Penalize spam/dup: if too many identical-ish lines
+    let dupPairs = 0;
+    for (let i = 1; i < withText.length; i++) {
+      const sim = combinedSimilarity(withText[i - 1].text, withText[i].text);
+      if (sim >= 0.92) dupPairs++;
+    }
+    const dupRate = withText.length <= 1 ? 0 : dupPairs / (withText.length - 1);
+    const conf = 0.15 + (0.75 * coverage) - (0.35 * dupRate);
+    return clamp01(conf);
   }
 
   addClient(clientId, role, name, ws, micId = null) {
@@ -595,102 +759,73 @@ class Room {
     this.clients.delete(clientId);
     this.updatedAt = Date.now();
     this.broadcastMicHealth();
+  }  addTranscript(entry) {
+  if (!this.transcripts) this.transcripts = [];
+  const tsMs = entry.ts || entry.tsMs || Date.now();
+  entry.ts = tsMs;
+  entry.tsMs = tsMs;
+
+  const textNorm = normalizeText(entry.text);
+  if (!textNorm) return false;
+
+  const startWin = tsMs - DEDUP_WINDOW_MS;
+  const endWin = tsMs + DEDUP_WINDOW_MS;
+
+  // collect candidates in window by scanning from the end (transcript is near-chronological)
+  const candidates = [];
+  for (let i = this.transcripts.length - 1; i >= 0; i--) {
+    const t = this.transcripts[i];
+    const tTs = t.ts || t.tsMs || 0;
+    if (tTs < startWin) break;
+    if (tTs <= endWin) candidates.push({ idx: i, t });
   }
 
-  addTranscript(entry) {
-    const curTs = Number(entry.ts || 0) || Date.now();
-    entry.ts = curTs;
-    const curText = String(entry.text || '').trim();
-    entry.text = entry.text ?? '';
-
-    // Insert transcripts in timestamp order (multi-mic processing can complete out-of-order).
-    // Keep stable ordering for equal timestamps by inserting after existing equal-ts items.
-    let insertIdx = this.transcripts.length;
-    if (this.transcripts.length > 0) {
-      const last = this.transcripts[this.transcripts.length - 1];
-      const lastTs = Number(last.ts || 0);
-      if (Number.isFinite(lastTs) && curTs < lastTs) {
-        let lo = 0;
-        let hi = this.transcripts.length;
-        while (lo < hi) {
-          const mid = (lo + hi) >> 1;
-          const ts = Number(this.transcripts[mid]?.ts || 0);
-          if (ts <= curTs) lo = mid + 1;
-          else hi = mid;
-        }
-        insertIdx = lo;
-      }
+  let bestDup = null;
+  for (const c of candidates) {
+    const score = combinedSimilarity(textNorm, c.t.text);
+    if (score >= 0.92) {
+      if (!bestDup || score > bestDup.score) bestDup = { idx: c.idx, score };
     }
-
-    // De-dupe identical adjacent transcripts from the same speaker within a short window
-    const prev = insertIdx > 0 ? this.transcripts[insertIdx - 1] : null;
-    const next = insertIdx < this.transcripts.length ? this.transcripts[insertIdx] : null;
-    for (const neighbor of [prev, next]) {
-      if (!neighbor) continue;
-      const sameSpeaker = neighbor.speaker === entry.speaker;
-      const sameText = String(neighbor.text || '').trim() === curText;
-      const neighborTs = Number(neighbor.ts || 0);
-      if (sameSpeaker && sameText && neighborTs && curTs && Math.abs(curTs - neighborTs) <= TRANSCRIPT_MERGE_WINDOW_MS) {
-        return false;
-      }
-    }
-
-    // Stronger repeat suppression: if the same speaker repeats the exact same line many times,
-    // drop it (common in low-quality audio or fragmented streams).
-    if (curText) {
-      const nowTs = curTs;
-      let recentSame = 0;
-      // Scan last ~12 entries (cheap), count exact repeats within 30s.
-      for (let i = this.transcripts.length - 1; i >= 0 && i >= this.transcripts.length - 12; i--) {
-        const t = this.transcripts[i];
-        const ts = Number(t.ts || 0);
-        if (nowTs - ts > 30000) break;
-        if (t.speaker === entry.speaker && String(t.text || '').trim() === curText) {
-          recentSame += 1;
-          if (recentSame >= 2) return false; // already seen 2x recently → suppress spam
-        }
-      }
-    }
-
-    let insertedIndex = insertIdx;
-    if (insertIdx === this.transcripts.length) {
-      this.transcripts.push(entry);
-      insertedIndex = this.transcripts.length - 1;
-    } else {
-      this.transcripts.splice(insertIdx, 0, entry);
-    }
-
-    // Cross-mic neighbor de-dupe: if two mics capture the same phrase in a short window,
-    // drop one copy to avoid double-lines.
-    const prev2 = insertedIndex > 0 ? this.transcripts[insertedIndex - 1] : null;
-    const next2 = insertedIndex + 1 < this.transcripts.length ? this.transcripts[insertedIndex + 1] : null;
-    if (prev2) {
-      const prevTs = Number(prev2.ts || 0);
-      if (prevTs && curTs && Math.abs(curTs - prevTs) <= TRANSCRIPT_MERGE_WINDOW_MS && similarTranscript(prev2, entry)) {
-        this.transcripts.splice(insertedIndex, 1);
-        this.updatedAt = Date.now();
-        return false;
-      }
-    }
-    if (next2) {
-      const nextTs = Number(next2.ts || 0);
-      if (nextTs && curTs && Math.abs(curTs - nextTs) <= TRANSCRIPT_MERGE_WINDOW_MS && similarTranscript(entry, next2)) {
-        this.transcripts.splice(insertedIndex + 1, 1);
-      }
-    }
-
-    // Keep only last MAX_TRANSCRIPTS entries
-    if (this.transcripts.length > MAX_TRANSCRIPTS) {
-      this.transcripts.shift();
-    }
-    
-    // Also remove entries older than TRANSCRIPT_MAX_AGE_MS
-    const cutoff = Date.now() - TRANSCRIPT_MAX_AGE_MS;
-    this.transcripts = this.transcripts.filter(t => t.ts >= cutoff);
-    
-    this.updatedAt = Date.now();
-    return true;
   }
+
+  if (bestDup) {
+    const existing = this.transcripts[bestDup.idx];
+    const eConf = typeof existing.confidence === "number" ? existing.confidence : 0;
+    const nConf = typeof entry.confidence === "number" ? entry.confidence : 0;
+    const existingLen = normalizeText(existing.text).length;
+    const newLen = textNorm.length;
+
+    const keepNew =
+      (nConf > eConf + 0.05) ||
+      (nConf === eConf && newLen > existingLen + 6);
+
+    if (keepNew) {
+      this.transcripts[bestDup.idx] = { ...existing, ...entry, ts: tsMs, tsMs };
+    }
+    return false; // duplicate suppressed
+  }
+
+  this.transcripts.push(entry);
+
+  // Ensure ordering if a slightly out-of-order chunk arrives
+  this.transcripts.sort((a, b) => {
+    const aTs = a.ts || a.tsMs || 0;
+    const bTs = b.ts || b.tsMs || 0;
+    return aTs - bTs;
+  });
+
+  // Keep only last MAX_TRANSCRIPTS entries
+  if (this.transcripts.length > MAX_TRANSCRIPTS) {
+    this.transcripts.shift();
+  }
+  
+  // Also remove entries older than TRANSCRIPT_MAX_AGE_MS
+  const cutoff = Date.now() - TRANSCRIPT_MAX_AGE_MS;
+  this.transcripts = this.transcripts.filter(t => (t.ts || t.tsMs || 0) >= cutoff);
+  
+  this.updatedAt = Date.now();
+  return true;
+}
 
   getRecentTranscripts(seconds) {
     const cutoff = Date.now() - (seconds * 1000);
@@ -1158,7 +1293,12 @@ Respond in JSON format:
     
     // Topic stability logic: require confidence >= 0.60 AND persist for 2 updates
     const newTopic = result.topic || room.summary.topic;
-    const newConfidence = result.confidence || 0.5;
+    // Use coverage-based confidence instead of LLM-reported confidence
+    const tsNow = Date.now();
+    const coverageConfidence = room.computeConfidence(tsNow);
+    // Blend LLM confidence with coverage: 60% coverage, 40% LLM
+    const blendedConfidence = 0.6 * coverageConfidence + 0.4 * (result.confidence || 0.5);
+    const newConfidence = clamp01(blendedConfidence);
     const topicChanged = newTopic !== room.summary.topic && newConfidence >= TOPIC_SHIFT_CONFIDENCE;
     
     let finalTopic = room.summary.topic;
@@ -1186,6 +1326,11 @@ Respond in JSON format:
       room.summary.topicStability.pendingCount = 0;
     }
     
+    // Update topic timeline when topic changes or periodically
+    if (finalTopic && finalTopic !== 'Waiting for conversation' && finalTopic !== 'General discussion') {
+      room.updateTopicForTimestamp(tsNow, finalTopic);
+    }
+    
     room.summary = {
       topic: finalTopic,
       subtopic: result.subtopic || '',
@@ -1195,7 +1340,7 @@ Respond in JSON format:
       decisions: clampedDecisions,
       next_steps: clampedNextSteps,
       confidence: newConfidence,
-      lastUpdated: Date.now(),
+      lastUpdated: tsNow,
       topicStability: room.summary.topicStability
     };
 
@@ -1871,7 +2016,43 @@ wss.on('connection', (ws) => {
           break;
         }
 
-        case 'audio_chunk': {
+          case 'mic_heartbeat': {
+    const room = rooms.get(message.roomCode);
+    if (!room) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Room not found' }));
+      return;
+    }
+    const ts = typeof message.tsMs === 'number' ? message.tsMs : nowMs();
+    const deviceId = message.deviceId;
+    if (!deviceId) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Missing deviceId' }));
+      return;
+    }
+
+    const dev = upsertMicDevice(room, deviceId, {
+      clientId: ws.clientId || ws._clientId || null,
+      name: message.name || 'Mic',
+      heartbeatTs: ts,
+      lastActivity: ts,
+      streaming: !!message.streaming,
+      paused: !!message.paused,
+      connectedAt: (room.activeMics?.get(deviceId)?.connectedAt) || ts
+    });
+
+    dev.status = computeDeviceStatus(dev);
+
+    room.broadcast({
+      type: 'device_list',
+      roomCode: room.code || message.roomCode,
+      heartbeatTtlMs: HEARTBEAT_TTL_MS,
+      heartbeatIntervalHintMs: HEARTBEAT_INTERVAL_HINT_MS,
+      devices: buildDeviceList(room)
+    });
+
+    break;
+  }
+
+case 'audio_chunk': {
           if (!currentRoom) {
             ws.send(JSON.stringify({
               type: 'error',
