@@ -1249,7 +1249,12 @@ Respond in JSON format:
     
     // Topic stability logic: require confidence >= 0.60 AND persist for 2 updates
     const newTopic = result.topic || room.summary.topic;
-    const newConfidence = result.confidence || 0.5;
+    // Use coverage-based confidence instead of LLM-reported confidence
+    const tsNow = Date.now();
+    const coverageConfidence = room.computeConfidence(tsNow);
+    // Blend LLM confidence with coverage: 60% coverage, 40% LLM
+    const blendedConfidence = 0.6 * coverageConfidence + 0.4 * (result.confidence || 0.5);
+    const newConfidence = clamp01(blendedConfidence);
     const topicChanged = newTopic !== room.summary.topic && newConfidence >= TOPIC_SHIFT_CONFIDENCE;
     
     let finalTopic = room.summary.topic;
@@ -1277,7 +1282,6 @@ Respond in JSON format:
       room.summary.topicStability.pendingCount = 0;
     }
     
-    const tsNow = Date.now();
     // Update topic timeline when topic changes or periodically
     if (finalTopic && finalTopic !== 'Waiting for conversation' && finalTopic !== 'General discussion') {
       room.updateTopicForTimestamp(tsNow, finalTopic);
