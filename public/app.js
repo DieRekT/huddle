@@ -1708,6 +1708,8 @@ function connectAndJoin(code, passcode = null) {
         const uniqueName = userName ? `${userName} (${micLabel})` : micLabel;
         const micId = `mic-${deviceId}`;
         console.log(`[Mic] Joining as ${uniqueName} with micId ${micId}`);
+        // Set currentRole before sending join
+        currentRole = 'mic';
         ws.send(JSON.stringify({
             type: 'join',
             roomCode: code,
@@ -1718,6 +1720,9 @@ function connectAndJoin(code, passcode = null) {
             label: micLabel,
             passcode: passcode
         }));
+        // Start heartbeat immediately since we're already connected
+        console.log('[Diagnostic] Mic role detected (already connected), starting heartbeat for room:', code);
+        startMicHeartbeat(ws, code);
         return;
     }
     
@@ -1748,6 +1753,8 @@ function connectAndJoin(code, passcode = null) {
             const uniqueName = userName ? `${userName} (${micLabel})` : micLabel;
             const micId = `mic-${deviceId}`;
             console.log(`[Mic] Joining as ${uniqueName} with micId ${micId}`);
+            // Set currentRole before sending join (needed for heartbeat check)
+            currentRole = 'mic';
             ws.send(JSON.stringify({
                 type: 'join',
                 roomCode: code,
@@ -1759,12 +1766,8 @@ function connectAndJoin(code, passcode = null) {
                 passcode: passcode
             }));
             // Start heartbeat for mic role (start after join is sent)
-            if (currentRole === 'mic') {
-                console.log('[Diagnostic] Mic role detected, starting heartbeat for room:', code);
-                startMicHeartbeat(ws, code);
-            } else {
-                console.log('[Diagnostic] Not starting heartbeat - role:', currentRole);
-            }
+            console.log('[Diagnostic] Mic role detected, starting heartbeat for room:', code);
+            startMicHeartbeat(ws, code);
         };
         
         ws.onmessage = (event) => {
