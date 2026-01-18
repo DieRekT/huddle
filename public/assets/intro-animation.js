@@ -95,8 +95,6 @@
       
       // Initialize backdrop particles first (these will form the logo)
       this.initBackdropParticles();
-      this.initOrbits();
-      this.initLines();
       
       // Load image and assign targets to backdrop particles
       this.loadImage().then(() => {
@@ -543,66 +541,20 @@
           }
         }
         
-        // Phase 2: Orbits & Lines (0.8-2s) - Quick orbits
-        if (t >= 0.8 && t < 2) {
+        // Phase 2: Logo Emergence via Particles (0.8-4.8s) - 4 seconds for smooth formation
+        if (t >= 0.8) {
           try {
             this.drawBackdrop(1);
-            const phase2Progress = (t - 0.8) / 1.2;
-            this.drawOrbits(phase2Progress);
-            this.drawLines(phase2Progress);
-          } catch (err) {
-            console.error('[Intro] Error drawing orbits/lines:', err);
-          }
-        }
-        
-        // Phase 3: Logo Emergence via Particles (2-6s) - 4 seconds for smooth formation
-        if (t >= 2) {
-          try {
-            this.drawBackdrop(1);
-            this.drawOrbits(1);
-            this.drawLines(1);
-            if (t < 6) {
-              const phase3Progress = Math.min(1, (t - 2) / 4); // 4 seconds for smooth formation
-              this.drawParticleLogo(phase3Progress);
+            if (t < 4.8) {
+              const phase2Progress = Math.min(1, (t - 0.8) / 4); // 4 seconds for smooth formation
+              this.drawParticleLogo(phase2Progress);
             } else {
-              // Keep drawing logo after phase 3 completes
-              this.drawParticleLogo(1);
+              // Keep drawing logo after formation completes
+              this.drawParticleLogo(1, true); // Enable pulsing
             }
           } catch (err) {
             console.error('[Intro] Error drawing particle logo:', err);
           }
-        }
-        
-        // Phase 4: Active Room Reveal (6-7s) - Quick reveal
-        if (t >= 6 && t < 7) {
-          this.drawBackdrop(1);
-          this.drawOrbits(1);
-          this.drawLines(1);
-          const phase4Progress = (t - 6) / 1;
-          this.drawParticleLogo(1);
-          this.showActiveRooms(phase4Progress);
-        }
-        
-        // Phase 5: CTA Appearance (7-8s) - Quick appearance
-        if (t >= 7 && t < 8) {
-          this.drawBackdrop(1);
-          this.drawOrbits(1);
-          this.drawLines(1);
-          const phase5Progress = (t - 7) / 1;
-          this.drawParticleLogo(1);
-          this.showActiveRooms(1);
-          this.showCTA(phase5Progress);
-        }
-        
-        // Phase 6: Idle State (8s+) - Pulsing
-        if (t >= 8) {
-          this.drawBackdrop(1);
-          this.drawOrbits(1);
-          this.drawLines(1);
-          this.drawParticleLogo(1, true); // Enable pulsing
-          this.showActiveRooms(1);
-          this.showCTA(1);
-          this.idleState(t - 8);
         }
         
         // Continue animation

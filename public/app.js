@@ -43,8 +43,9 @@ const micDeviceId = getStableDeviceId();
 function startMicHeartbeat(ws, roomCode) {
   stopMicHeartbeat();
   const name = getMicDisplayName();
+  console.log('[Diagnostic] Starting mic heartbeat:', { roomCode, name, deviceId: micDeviceId, wsState: ws?.readyState });
 
-  const tick = () => {
+const tick = () => {
     safeSend(ws, {
       type: 'mic_heartbeat',
       roomCode,
@@ -54,6 +55,10 @@ function startMicHeartbeat(ws, roomCode) {
       paused: !!micPaused,
       tsMs: Date.now()
     });
+    // Only log heartbeat occasionally to reduce console spam (every 10th heartbeat ~= every 30s)
+    if (micStreaming && Math.random() < 0.1) {
+      console.log('[Diagnostic] Mic heartbeat sent:', { roomCode, name, streaming: micStreaming, paused: micPaused, wsState: ws?.readyState });
+    }
   };
 
   tick();
@@ -100,6 +105,7 @@ let transcriptEntries = []; // viewer-side cache for export
 let lastRoomState = null;
 let lastTranscriptAt = 0;
 let lastMicRoster = [];
+let lastMicRosterSignature = null; // Signature for spam prevention
 let wsConnected = false;
 let lastAudioWarningAt = 0;
 let lastAudioWarningReason = '';
@@ -904,6 +910,11 @@ if (typeof window !== 'undefined') {
 async function initializeRoute() {
     if (!routeInfo) return;
     
+    // Set viewer opened timestamp for connecting grace period
+    if (routeInfo.route === 'viewer') {
+        window.__viewerOpenedAt = Date.now();
+    }
+    
     if (routeInfo.route === 'host') {
         // /host route: create room via POST /api/rooms, then show host UI (invite + open viewer)
         try {
@@ -1570,6 +1581,9 @@ function connectAndCreate() {
 }
 
 function connectAndJoinAsViewer(code, passcode = null) {
+    // Track room join time for connecting grace period
+    window.__roomJoinedAt = Date.now();
+    
     // Check if WebSocket is already connected
     if (ws && ws.readyState === WebSocket.OPEN) {
         // Already connected, send message immediately
@@ -1615,6 +1629,18 @@ function connectAndJoinAsViewer(code, passcode = null) {
                 deviceId: deviceId,
                 passcode: passcode
             }));
+            
+            // Start keepalive pings for Cloudflare-safe connection
+            clearInterval(window.__viewerPingTimer);
+            window.__viewerPingTimer = setInterval(() => {
+                try {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'ping', roomCode: code, ts: Date.now() }));
+                    }
+                } catch (e) {
+                    // Ignore send errors
+                }
+            }, 8000);
         };
         
         ws.onmessage = (event) => {
@@ -1642,6 +1668,10 @@ function connectAndJoinAsViewer(code, passcode = null) {
             wsConnected = false;
             updateStatusBars();
             hideLoaderMinDelay();
+            
+            // Clear keepalive ping timer
+            clearInterval(window.__viewerPingTimer);
+            window.__viewerPingTimer = null;
             
             if (currentRoom && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                 const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
@@ -1719,7 +1749,10 @@ function connectAndJoin(code, passcode = null) {
             }));
             // Start heartbeat for mic role (start after join is sent)
             if (currentRole === 'mic') {
+                console.log('[Diagnostic] Mic role detected, starting heartbeat for room:', code);
                 startMicHeartbeat(ws, code);
+            } else {
+                console.log('[Diagnostic] Not starting heartbeat - role:', currentRole);
             }
         };
         
@@ -1799,6 +1832,11 @@ function handleMessage(message) {
             clientId = message.clientId;
             break;
             
+        case 'pong':
+            // Optional: track latency / connection health
+            window.__lastPongTs = Date.now();
+            break;
+            
         case 'room_created':
             currentRoom = message.roomCode;
             adminToken = message.adminToken;
@@ -1823,6 +1861,11 @@ function handleMessage(message) {
                 try {
                     adminToken = getRoomAdminToken(currentRoom);
                 } catch {}
+            }
+            // Start heartbeat for mic role after join confirmation
+            if (message.role === 'mic' && ws && ws.readyState === WebSocket.OPEN) {
+                console.log('[Diagnostic] Mic role joined, starting heartbeat for room:', currentRoom);
+                startMicHeartbeat(ws, currentRoom);
             }
             // If we just created the room, stay on host screen - don't auto-redirect to viewer
             // User will click "Open Room" button to go to viewer screen
@@ -1944,7 +1987,44 @@ function handleMessage(message) {
         case 'device_list':
             // Update device list UI from heartbeat-driven device registry
             if (message.devices && Array.isArray(message.devices)) {
+                // Convert device_list to mic roster format for compatibility
+                const micRoster = message.devices.map(dev => ({
+                    deviceId: dev.deviceId || dev.id,
+                    name: dev.name || 'Mic',
+                    streaming: dev.streaming || false,
+                    status: dev.status || 'offline',
+                    lastSeen: dev.lastSeen || dev.lastHeartbeat || dev.heartbeatTs || Date.now()
+                }));
+                
+                // Only log if roster changed (to reduce console spam)
+                // Use signature-based comparison to reliably detect actual changes
+                const newIds = micRoster.map(m => String(m?.deviceId || m?.id || '')).filter(id => id && id !== 'undefined' && id !== 'null' && id !== '').sort();
+                const newSignature = JSON.stringify(newIds);
+                const rosterChanged = lastMicRosterSignature !== null && lastMicRosterSignature !== newSignature;
+                
+                if (rosterChanged) {
+                    const prevIds = (lastMicRoster || []).map(m => String(m?.deviceId || m?.id || '')).filter(id => id && id !== 'undefined' && id !== 'null' && id !== '').sort();
+                    console.log('[Diagnostic] Mic roster changed:', {
+                        prevCount: prevIds.length,
+                        newCount: newIds.length,
+                        prevIds: prevIds,
+                        newIds: newIds,
+                        devices: micRoster.map(d => ({ name: d.name, status: d.status, streaming: d.streaming })),
+                        room: currentRoom
+                    });
+                }
+                
+                // Update signature AFTER comparison (always update, even if unchanged)
+                lastMicRosterSignature = newSignature;
+                
+                // Update lastMicRoster AFTER comparison
+                lastMicRoster = micRoster;
+                
+                // updateDeviceListUI handles the conversion and UI update internally
+                // No need to call updateMicRoster separately as it's redundant
                 updateDeviceListUI(message.devices);
+                updateStatusBars();
+                updateListeningStatus();
             }
             break;
             
@@ -2077,6 +2157,12 @@ function handleMessage(message) {
             break;
 
         case 'mic_roster_update':
+            console.log('[Diagnostic] Mic roster update message received:', {
+                count: message.micRoster?.length || 0,
+                mics: message.micRoster || [],
+                room: currentRoom,
+                role: currentRole
+            });
             updateMicRoster(message.micRoster);
             lastMicRoster = message.micRoster || [];
             updateViewerPrompt();
@@ -2277,9 +2363,11 @@ async function showMicScreen() {
     // Show transcript card (initially hidden, will show when recording starts)
     if (micTranscriptCard) {
         micTranscriptCard.style.display = 'block';
-        // Initialize transcript state (collapsed by default)
+        // Initialize transcript state (expanded by default, so content shows without extra clicks)
         if (micTranscriptContent) {
-            const transcriptExpanded = localStorage.getItem('huddle_mic_transcript_expanded') === 'true';
+            const stored = localStorage.getItem('huddle_mic_transcript_expanded');
+            // Default to expanded if no stored preference
+            const transcriptExpanded = stored === null ? true : stored === 'true';
             if (!transcriptExpanded) {
                 micTranscriptContent.classList.add('mic-transcript-collapsed');
                 if (micTranscriptToggle) micTranscriptToggle.textContent = 'Show';
@@ -2795,32 +2883,211 @@ function updateActionsCard(actions) {
 }
 
 // Update device list UI from heartbeat-driven device_list message
+// ===== Device Truth UI helpers (B3 UX Sanity Pass) =====
+
+const STATUS_PRIORITY = ["LIVE", "IDLE", "CONNECTED", "PAUSED", "OFFLINE"];
+
+function normalizeTruthStatus(d) {
+  // Backward-compatible: prefer truth model status; fall back to legacy fields if needed.
+  const s = (d && (d.status || d.truthStatus || d.state || "")).toString().toUpperCase();
+  
+  if (["LIVE", "IDLE", "CONNECTED", "PAUSED", "OFFLINE"].includes(s)) return s;
+  
+  // Legacy fallbacks (best effort):
+  // - Some older builds used "SENDING" for streaming, treat as CONNECTED/IDLE depending on lastSpeech.
+  if (s === "SENDING") return "CONNECTED";
+  
+  return "OFFLINE";
+}
+
+function labelForStatus(status) {
+  switch (status) {
+    case "LIVE": return "Speaking";
+    case "IDLE": return "Listening";
+    case "CONNECTED": return "Ready";
+    case "PAUSED": return "Paused";
+    case "OFFLINE": return "Offline";
+    default: return "Offline";
+  }
+}
+
+function tooltipForStatus(status) {
+  switch (status) {
+    case "LIVE":
+      return "This microphone is actively picking up speech.";
+    case "IDLE":
+      return "This microphone is on and listening, but no one is speaking right now.";
+    case "CONNECTED":
+      return "This microphone is connected but not yet streaming audio.";
+    case "PAUSED":
+      return "This microphone is temporarily paused.";
+    case "OFFLINE":
+    default:
+      return "This microphone is not currently connected.";
+  }
+}
+
+function summarizeStatuses(devices) {
+  const counts = { LIVE: 0, IDLE: 0, CONNECTED: 0, PAUSED: 0, OFFLINE: 0 };
+  for (const d of (devices || [])) {
+    counts[normalizeTruthStatus(d)]++;
+  }
+  return counts;
+}
+
+function pickListeningState(counts, connectingGrace = false) {
+  // Copy strings (exact)
+  if (connectingGrace) return "Connecting to microphones…";
+  
+  const active = (counts.LIVE + counts.IDLE + counts.CONNECTED + counts.PAUSED);
+  if (active === 0) return "Not listening — no active microphones";
+  if (counts.LIVE > 0) return "Listening — speech detected";
+  return "Listening — no one speaking";
+}
+
+function makeDeviceSummaryLine(counts) {
+  // "2 speaking, 1 listening" etc. Uses viewer-facing labels.
+  if ((counts.LIVE + counts.IDLE + counts.CONNECTED + counts.PAUSED) === 0) {
+    return "No active microphones";
+  }
+  
+  // Prefer LIVE then IDLE then CONNECTED then PAUSED
+  const parts = [];
+  if (counts.LIVE) parts.push(`${counts.LIVE} speaking`);
+  if (counts.IDLE) parts.push(`${counts.IDLE} listening`);
+  if (!parts.length && counts.CONNECTED) parts.push(`${counts.CONNECTED} ready`);
+  if (counts.PAUSED) parts.push(`${counts.PAUSED} paused`);
+  
+  return parts.join(", ");
+}
+
+function shouldShowMultiMicReassurance(counts) {
+  // "Multiple microphones active — improved coverage"
+  const activeMics = counts.LIVE + counts.IDLE + counts.CONNECTED;
+  return activeMics >= 2;
+}
+
+// Optional: silence reassurance. You can drive this via timestamps if available.
+function shouldShowSilenceReassurance(roomSignal) {
+  // roomSignal example: { confidence, lastSegmentMsAgo, ... } if you expose it later.
+  // If you already have something similar client-side, wire it here.
+  const conf = roomSignal?.confidence ?? 0;
+  const lastSegAgo = roomSignal?.lastSegmentMsAgo ?? null;
+  
+  // Only show if we have enough confidence AND we know it's been quiet.
+  if (conf >= 0.6 && typeof lastSegAgo === "number" && lastSegAgo >= 35000) return true;
+  return false;
+}
+
+// Disconnect detection (non-alarming)
+window.__prevDeviceStatusById = window.__prevDeviceStatusById || new Map();
+
+function detectDisconnectToast(devices) {
+  const prev = window.__prevDeviceStatusById;
+  let disconnected = false;
+  
+  for (const d of (devices || [])) {
+    const id = d.deviceId || d.micId || d.id;
+    if (!id) continue;
+    
+    const curr = normalizeTruthStatus(d);
+    const last = prev.get(id);
+    
+    if (last === "LIVE" && curr === "OFFLINE") disconnected = true;
+    prev.set(id, curr);
+  }
+  
+  if (disconnected) {
+    const el = document.getElementById("micNotice");
+    if (el) {
+      el.textContent = "A microphone disconnected";
+      el.style.display = "";
+      clearTimeout(window.__micNoticeTimer);
+      window.__micNoticeTimer = setTimeout(() => {
+        el.style.display = "none";
+      }, 4000);
+    }
+  }
+}
+
 function updateDeviceListUI(devices) {
     if (!micHealthList) return;
     
     if (!devices || devices.length === 0) {
         updateMicHealthStrip([]);
+        // B3: Update viewer status to show "No mics"
+        if (viewerMicsStatus) {
+            viewerMicsStatus.textContent = 'No active microphones';
+        }
+        // Update listening state
+        const elListening = document.getElementById("roomListeningState");
+        if (elListening) elListening.textContent = "Not listening — no active microphones";
         return;
     }
     
-    // Map device status (LIVE/CONNECTED/PAUSED/OFFLINE) to mic roster format for compatibility
+    // B3 UX Sanity Pass: Use helper functions for consistent labels and summaries
+    const counts = summarizeStatuses(devices);
+    
+    // Map devices to mic roster format with truth model status
     const micRoster = devices.map(dev => {
-        const status = dev.status || 'OFFLINE';
-        // Map heartbeat status to legacy status format
+        const truthStatus = normalizeTruthStatus(dev);
+        
+        // Map to legacy format for backward compatibility with updateMicHealthStrip
         let legacyStatus = 'quiet';
-        if (status === 'LIVE') legacyStatus = 'live';
-        else if (status === 'CONNECTED' || status === 'PAUSED') legacyStatus = 'sending';
-        else legacyStatus = 'offline';
+        if (truthStatus === 'LIVE') {
+            legacyStatus = 'live';
+        } else if (truthStatus === 'IDLE') {
+            legacyStatus = 'sending';
+        } else if (truthStatus === 'CONNECTED') {
+            legacyStatus = 'quiet';
+        } else if (truthStatus === 'PAUSED') {
+            legacyStatus = 'quiet';
+        } else {
+            legacyStatus = 'offline';
+        }
         
         return {
             name: dev.name,
-            status: legacyStatus,
+            status: legacyStatus, // For backward compatibility
+            truthStatus: truthStatus, // B3: Store truth model status
+            statusLabel: labelForStatus(truthStatus), // B3: Human-readable label
             streaming: dev.streaming,
-            lastActivity: dev.lastSeen || Date.now()
+            paused: dev.paused,
+            lastActivity: dev.lastSeen || dev.heartbeatTs || Date.now(),
+            lastAudioTs: dev.lastAudioTs || null,
+            lastSpeechTs: dev.lastSpeechTs || null
         };
     });
     
-    // Use existing updateMicHealthStrip for rendering (already handles status chips)
+    // Update listening state line
+    const now = Date.now();
+    // Use __viewerOpenedAt if available (set on page load), fallback to __roomJoinedAt (set on WebSocket connect)
+    const viewerOpenedAt = window.__viewerOpenedAt || window.__roomJoinedAt;
+    const connectingGrace = (viewerOpenedAt && (now - viewerOpenedAt < 5000));
+    const listeningLine = pickListeningState(counts, connectingGrace);
+    const summaryLine = makeDeviceSummaryLine(counts);
+    
+    const elListening = document.getElementById("roomListeningState");
+    if (elListening) elListening.textContent = listeningLine;
+    
+    // Update viewer status summary
+    if (viewerMicsStatus) {
+        viewerMicsStatus.textContent = summaryLine;
+    }
+    
+    // Optional multi-mic reassurance
+    const elMulti = document.getElementById("multiMicNote");
+    if (elMulti) {
+        elMulti.style.display = shouldShowMultiMicReassurance(counts) ? "" : "none";
+        if (elMulti.textContent.trim() === "") {
+            elMulti.textContent = "Multiple microphones active — improved coverage";
+        }
+    }
+    
+    // Detect disconnects (non-alarming)
+    detectDisconnectToast(devices);
+    
+    // Use existing updateMicHealthStrip for rendering (enhanced with truth model)
     updateMicHealthStrip(micRoster);
 }
 
@@ -2855,18 +3122,39 @@ function updateMicHealthStrip(micRoster) {
         const secSinceActivity = Math.floor((now - lastActivity) / 1000);
         const secSinceTranscript = lastTranscript ? Math.floor((now - lastTranscript) / 1000) : null;
         
-        // Viewer-friendly status:
-        // - live: server produced transcript recently
-        // - sending: server is receiving audio recently, but hasn't produced transcript yet (quiet/noisy)
-        // - quiet: connected but no recent activity
-        // - offline: stale/disconnected
+        // B3 UX Sanity Pass: Use helper functions for consistent labels and tooltips
+        const truthStatus = normalizeTruthStatus(mic);
+        const statusLabel = mic.statusLabel || labelForStatus(truthStatus);
+        const tooltipText = tooltipForStatus(truthStatus);
+        
+        // Map truth status to legacy display status for CSS classes
         let status = 'quiet';
-        if (secSinceActivity <= 20) {
-            status = (secSinceTranscript !== null && secSinceTranscript <= 30) ? 'live' : 'sending';
-        } else if (secSinceActivity <= 60) {
+        if (truthStatus === 'LIVE') {
+            status = 'live';
+        } else if (truthStatus === 'IDLE') {
+            status = 'sending';
+        } else if (truthStatus === 'CONNECTED') {
+            status = 'quiet';
+        } else if (truthStatus === 'PAUSED') {
             status = 'quiet';
         } else {
             status = 'offline';
+        }
+        
+        // Fallback: compute from timestamps if truth model not available (legacy behavior)
+        if (!mic.truthStatus && !mic.status) {
+            // Viewer-friendly status:
+            // - live: server produced transcript recently
+            // - sending: server is receiving audio recently, but hasn't produced transcript yet (quiet/noisy)
+            // - quiet: connected but no recent activity
+            // - offline: stale/disconnected
+            if (secSinceActivity <= 20) {
+                status = (secSinceTranscript !== null && secSinceTranscript <= 30) ? 'live' : 'sending';
+            } else if (secSinceActivity <= 60) {
+                status = 'quiet';
+            } else {
+                status = 'offline';
+            }
         }
         
         // Format "last seen" time
@@ -2883,25 +3171,17 @@ function updateMicHealthStrip(micRoster) {
             lastSeenText = secSinceActivity < 60 ? `${secSinceActivity}s ago` : `${Math.floor(secSinceActivity / 60)}m ago`;
         }
         
-        // Build tooltip
-        let tooltip = `${mic.name} (${status})`;
-        if (status === 'offline') {
-            tooltip += `. Last seen ${lastSeenText}. Room is live, but this mic is disconnected.`;
-        } else if (status === 'quiet') {
-            tooltip += `. Last activity ${lastSeenText}.`;
-        } else if (status === 'sending') {
-            tooltip += `. Sending audio (${lastSeenText}) but not transcribing yet.`;
-        } else {
-            tooltip += secSinceTranscript !== null ? `. Heard ${secSinceTranscript}s ago.` : '. Active now.';
-        }
+        // Build tooltip with device name
+        const tooltip = `${mic.name}: ${tooltipText}`;
         
         const chip = document.createElement('div');
-        chip.className = `mic-health-chip ${status}`;
+        const truthStatusClass = `truth-${truthStatus.toLowerCase()}`;
+        chip.className = `mic-health-chip ${status} ${truthStatusClass}`;
         chip.title = tooltip;
         chip.innerHTML = `
             <span class="status-dot"></span>
             <span class="mic-name">${escapeHtml(mic.name)}</span>
-            <span class="mic-status-label">${status.toUpperCase()}</span>
+            <span class="mic-status-label">${statusLabel}</span>
             ${lastSeenText ? `<span class="mic-last-seen">${lastSeenText}</span>` : ''}
         `;
         micHealthList.appendChild(chip);
@@ -2998,6 +3278,7 @@ function updateList(listElement, items) {
 
 function updateMicRoster(micRoster) {
     // Legacy function - now redirects to mic health strip
+    // Note: Logging moved to device_list handler to avoid duplicate logs
     updateMicHealthStrip(micRoster);
     
     // Also update old mic roster card if it still exists (backward compatibility)
@@ -3524,6 +3805,12 @@ if (analyzeTitleBtn) {
             return;
         }
 
+        // Check if transcripts are available before making the request
+        if (!transcriptEntries || transcriptEntries.length === 0) {
+            showToast('No transcripts available yet. Start speaking to generate transcripts.', 'warn');
+            return;
+        }
+
         // Disable button while analyzing
         analyzeTitleBtn.disabled = true;
         const originalText = analyzeTitleBtn.textContent;
@@ -3536,8 +3823,15 @@ if (analyzeTitleBtn) {
             });
 
             if (!response.ok) {
-                const error = await response.json();
-                throw new Error(error.error || 'Failed to analyze title');
+                const errorData = await response.json().catch(() => ({}));
+                const errorMsg = errorData.error || 'Failed to analyze title';
+                // Provide user-friendly message for common errors
+                if (errorMsg.includes('No transcripts available')) {
+                    showToast('No transcripts available yet. Start speaking to generate transcripts.', 'warn');
+                } else {
+                    throw new Error(errorMsg);
+                }
+                return;
             }
 
             const data = await response.json();
@@ -3548,8 +3842,11 @@ if (analyzeTitleBtn) {
                 throw new Error('No title returned');
             }
         } catch (error) {
-            console.error('Title analysis error:', error);
-            showToast(error.message || 'Failed to analyze title', 'error');
+            // Only log and show error if it's not a handled case (like the early return above)
+            if (error.message && !error.message.includes('No transcripts available')) {
+                console.error('Title analysis error:', error);
+                showToast(error.message || 'Failed to analyze title', 'error');
+            }
         } finally {
             // Re-enable button
             analyzeTitleBtn.disabled = false;
@@ -3799,7 +4096,14 @@ function reset() {
     if (consentError) consentError.style.display = 'none';
     if (micTranscriptContent) {
         micTranscriptContent.innerHTML = '<div class="empty-state">Listening…</div>';
-        micTranscriptContent.classList.add('mic-transcript-collapsed');
+        // Don't collapse on reset - keep user's preference or default to expanded
+        const stored = localStorage.getItem('huddle_mic_transcript_expanded');
+        const transcriptExpanded = stored === null ? true : stored === 'true';
+        if (!transcriptExpanded) {
+            micTranscriptContent.classList.add('mic-transcript-collapsed');
+        } else {
+            micTranscriptContent.classList.remove('mic-transcript-collapsed');
+        }
     }
     if (window.__topicUpdateTimeout) {
         clearTimeout(window.__topicUpdateTimeout);
@@ -3906,12 +4210,13 @@ async function startMic() {
         // Enable autoGainControl for iPad/iOS to boost audio signal and improve detection
         // This helps compensate for lower microphone sensitivity on mobile devices
         // Note: We also apply additional gain via Web Audio API gain node (see setupVAD)
+        // For iPad/iOS, enable noise suppression and echo cancellation for better audio quality
         audioStream = await navigator.mediaDevices.getUserMedia({ 
             audio: {
                 channelCount: 1,
                 sampleRate: 48000,
-                echoCancellation: false,
-                noiseSuppression: false,
+                echoCancellation: isIPad || isIOS ? true : false,  // Enable for iPad/iOS
+                noiseSuppression: isIPad || isIOS ? true : false,  // Enable for iPad/iOS
                 autoGainControl: isIPad || isIOS ? true : false // Enable for iPad/iOS to boost signal
             }
         });
@@ -3920,7 +4225,9 @@ async function startMic() {
         updateMicIconState('ready');
         
         // Try Realtime mode first if available (requires REALTIME_ENABLED=true on server)
-        if (window.RealtimeMic && !realtimeMicInitialized) {
+        // For iPad/iOS, prefer chunked transcription which is more reliable
+        const shouldTryRealtime = window.RealtimeMic && !realtimeMicInitialized && !isIOS && !isIPad;
+        if (shouldTryRealtime) {
             try {
                 await window.RealtimeMic.init(currentRoom, clientId, userName);
                 realtimeMicInitialized = true;
@@ -3941,12 +4248,20 @@ async function startMic() {
                 if (micWarningBanner) micWarningBanner.style.display = 'none';
                 if (consentError) consentError.style.display = 'none';
                 updateMicStats();
+                console.log('Realtime mode started successfully');
                 return; // Successfully started Realtime mode
             } catch (error) {
                 console.warn('Realtime mode failed, falling back to chunked transcription:', error);
                 useRealtimeMode = false;
+                realtimeMicInitialized = false;
+                // Clean up any partial Realtime state
+                try {
+                    if (window.RealtimeMic) window.RealtimeMic.cleanup();
+                } catch (e) {}
                 // Continue with fallback chunked transcription
             }
+        } else if (isIOS || isIPad) {
+            console.log('Using chunked transcription for iPad/iOS (more reliable)');
         }
         
         // Fallback to chunked transcription (existing implementation)
@@ -4466,6 +4781,18 @@ setInterval(() => {
 async function enableMicFromViewer() {
     if (isMicEnabled) return;
     
+    // Clean up any existing WebSocket connection before creating a new one
+    if (micWs) {
+        try {
+            if (micWs.readyState === WebSocket.OPEN || micWs.readyState === WebSocket.CONNECTING) {
+                micWs.close();
+            }
+        } catch (e) {
+            // Ignore close errors
+        }
+        micWs = null;
+    }
+    
     try {
         // Request microphone permission (ONLY when user clicks button)
         if (!navigator || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -4493,6 +4820,11 @@ async function enableMicFromViewer() {
         
         micWs.onopen = () => {
             console.log('Mic WebSocket connected (viewer→mic opt-in)');
+            // Safety check: ensure WebSocket is still open before sending
+            if (!micWs || micWs.readyState !== WebSocket.OPEN) {
+                console.warn('[Mic] WebSocket closed before join message could be sent');
+                return;
+            }
             // Join as mic with deviceId
             const micId = `mic-${deviceId}`;
             const micLabel = detectDeviceLabel();
@@ -4500,18 +4832,43 @@ async function enableMicFromViewer() {
             const uniqueName = userName ? `${userName} (${micLabel})` : micLabel;
             const passcode = getRoomPasscode(currentRoom);
             console.log(`[Mic] Joining as ${uniqueName} with micId ${micId}`);
-            micWs.send(JSON.stringify({
-                type: 'join',
-                roomCode: currentRoom,
-                role: 'mic',
-                name: uniqueName,
-                deviceId: deviceId,
-                micId: micId,
-                label: micLabel,
-                passcode: passcode
-            }));
-            // Start heartbeat after join
-            startMicHeartbeat(micWs, currentRoom);
+            try {
+                micWs.send(JSON.stringify({
+                    type: 'join',
+                    roomCode: currentRoom,
+                    role: 'mic',
+                    name: uniqueName,
+                    deviceId: deviceId,
+                    micId: micId,
+                    label: micLabel,
+                    passcode: passcode
+                }));
+                // Start heartbeat after join
+                startMicHeartbeat(micWs, currentRoom);
+                
+                // Start keepalive pings for Cloudflare-safe connection
+                clearInterval(window.__micPingTimer);
+                window.__micPingTimer = setInterval(() => {
+                    try {
+                        if (micWs && micWs.readyState === WebSocket.OPEN) {
+                            micWs.send(JSON.stringify({ type: 'ping', roomCode: currentRoom, ts: Date.now() }));
+                        }
+                    } catch (e) {
+                        // Ignore send errors
+                    }
+                }, 8000);
+            } catch (err) {
+                console.error('[Mic] Error sending join message:', err);
+                // If send fails, close and clean up
+                if (micWs) {
+                    try {
+                        micWs.close();
+                    } catch (e) {
+                        // Ignore close errors
+                    }
+                    micWs = null;
+                }
+            }
         };
         
         micWs.onmessage = (event) => {
@@ -4540,6 +4897,11 @@ async function enableMicFromViewer() {
         micWs.onclose = () => {
             console.log('Mic WebSocket closed');
             stopMicHeartbeat();
+            
+            // Clear keepalive ping timer
+            clearInterval(window.__micPingTimer);
+            window.__micPingTimer = null;
+            
             if (isMicEnabled) {
                 // Reconnect if mic is still enabled
                 setTimeout(() => {

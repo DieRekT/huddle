@@ -10,6 +10,8 @@ let isRecording = false;
 let roomCode = null;
 let micId = null;
 let speakerName = 'Mic';
+let isRealtimeMicMuted = false; // Track mute state
+let gainNodeRealtime = null; // Gain node for boosting mic signal
 
 // Initialize Realtime transcription
 async function initRealtimeMic(clientRoomCode, clientMicId, clientSpeakerName) {
@@ -215,16 +217,44 @@ async function startRealtimeRecording() {
   }
 
   try {
-    // Get microphone audio stream
+    // Detect iOS/iPad for enhanced audio settings
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    const isIPad = /iPad/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    
+    // Get microphone audio stream with optimized settings for clear speech
+    // Enable echo cancellation, noise suppression, and auto gain control
+    // autoGainControl boosts mic signal (like moving mic closer)
     realtimeAudioStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
         sampleRate: 24000, // Realtime API supports 24kHz
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false
+        echoCancellation: true,  // Reduce echo/feedback
+        noiseSuppression: true,  // Reduce background noise
+        autoGainControl: true    // Boost mic signal automatically (like moving mic closer)
       }
     });
+
+    // Check if mic is muted
+    const audioTrack = realtimeAudioStream.getAudioTracks()[0];
+    if (audioTrack) {
+      isRealtimeMicMuted = audioTrack.muted || !audioTrack.enabled;
+      console.log('Mic track state:', {
+        muted: audioTrack.muted,
+        enabled: audioTrack.enabled,
+        readyState: audioTrack.readyState,
+        label: audioTrack.label
+      });
+      
+      // Monitor mute state changes
+      audioTrack.onmute = () => {
+        isRealtimeMicMuted = true;
+        console.warn('Microphone muted! Please unmute the mic device.');
+      };
+      audioTrack.onunmute = () => {
+        isRealtimeMicMuted = false;
+        console.log('Microphone unmuted');
+      };
+    }
 
     realtimeMediaStream = realtimeAudioStream;
 
@@ -234,8 +264,7 @@ async function startRealtimeRecording() {
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
     });
 
-    // Add audio track to peer connection
-    const audioTrack = realtimeAudioStream.getAudioTracks()[0];
+    // Add audio track to peer connection (audioTrack already defined above)
     pc.addTrack(audioTrack, realtimeAudioStream);
 
     // Handle ICE candidates for WebRTC connection
@@ -273,10 +302,23 @@ function streamAudioToRealtime(stream) {
   });
   
   const source = audioContext.createMediaStreamSource(stream);
+  
+  // Add gain node to boost audio signal (especially for mobile devices)
+  // This helps compensate for lower mic sensitivity
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const isIPad = /iPad/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  gainNodeRealtime = audioContext.createGain();
+  // Boost iOS/iPad audio more aggressively (like moving mic much closer)
+  const audioGain = (isIPad || isIOS) ? 2.5 : 1.5; // 1.5x gain for all devices, 2.5x for iOS/iPad
+  gainNodeRealtime.gain.value = audioGain;
+  console.log(`Applied audio gain: ${audioGain}x (${isIOS || isIPad ? 'iOS/iPad' : 'standard'})`);
+  
+  source.connect(gainNodeRealtime);
+  
   const processor = audioContext.createScriptProcessor(4096, 1, 1);
 
   processor.onaudioprocess = (event) => {
-    if (!isRecording || !realtimeSocket || realtimeSocket.readyState !== WebSocket.OPEN) {
+    if (!isRecording || !realtimeSocket || realtimeSocket.readyState !== WebSocket.OPEN || isRealtimeMicMuted) {
       return;
     }
 
@@ -298,11 +340,11 @@ function streamAudioToRealtime(stream) {
     }));
   };
 
-  source.connect(processor);
+  gainNodeRealtime.connect(processor);
   processor.connect(audioContext.destination);
 
   // Store processor for cleanup
-  realtimeSession = { audioContext, processor, source };
+  realtimeSession = { audioContext, processor, source, gainNode: gainNodeRealtime };
 }
 
 // Stop Realtime recording
@@ -320,12 +362,16 @@ function stopRealtimeRecording() {
 
   // Cleanup audio processing
   if (realtimeSession) {
-    const { audioContext, processor, source } = realtimeSession;
+    const { audioContext, processor, source, gainNode } = realtimeSession;
     if (processor) processor.disconnect();
+    if (gainNode) gainNode.disconnect();
     if (source) source.disconnect();
     if (audioContext) audioContext.close().catch(() => {});
     realtimeSession = null;
   }
+  
+  gainNodeRealtime = null;
+  isRealtimeMicMuted = false;
 
   // Close WebRTC connection
   if (pc) {
@@ -350,13 +396,23 @@ function cleanupRealtime() {
   currentTranscriptBuffer = '';
 }
 
+// Check if mic is muted
+function checkRealtimeMicMute() {
+  if (!realtimeAudioStream) return false;
+  const audioTrack = realtimeAudioStream.getAudioTracks()[0];
+  if (!audioTrack) return false;
+  return audioTrack.muted || !audioTrack.enabled || isRealtimeMicMuted;
+}
+
 // Export functions for use in main app
 window.RealtimeMic = {
   init: initRealtimeMic,
   start: startRealtimeRecording,
   stop: stopRealtimeRecording,
   cleanup: cleanupRealtime,
-  isRecording: () => isRecording
+  isRecording: () => isRecording,
+  isMuted: checkRealtimeMicMute,
+  checkMute: checkRealtimeMicMute // Alias for clarity
 };
 
 

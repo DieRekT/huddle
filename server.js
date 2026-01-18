@@ -14,6 +14,7 @@ import QRCode from 'qrcode';
 import os from 'os';
 import { execSync } from 'child_process';
 import { readFileSync } from 'fs';
+import { RoomSignalEngine } from './room_signal_engine.js';
 
 dotenv.config();
 
@@ -141,6 +142,7 @@ const ALLOW_DIRECT_TRANSCRIBE_FALLBACK = process.env.ALLOW_DIRECT_TRANSCRIBE_FAL
 const DEBUG_DUMP_WAV = process.env.DEBUG_DUMP_WAV === '1';
 const DEBUG_DUMP_WAV_PATH = process.env.DEBUG_DUMP_WAV_PATH || '/tmp/huddle_debug.wav';
 const DEBUG_DUMP_WAV_COOLDOWN_MS = parseInt(process.env.DEBUG_DUMP_WAV_COOLDOWN_MS || '10000');
+const USE_RSE_FOR_RTR = process.env.USE_RSE_FOR_RTR === 'true';
 
 let lastDebugDumpAt = 0;
 
@@ -316,6 +318,25 @@ function combinedSimilarity(a,b){
   return 0.65*jw + 0.35*jac;
 }
 
+// Helper: Mark device heartbeat (for keepalive pings)
+function markDeviceHeartbeat(room, clientId) {
+  if (!room || !room.activeMics) return;
+  
+  // Find device by clientId (check client's deviceId/micId)
+  const client = room.clients.get(clientId);
+  if (!client) return;
+  
+  // Device ID priority: deviceId > micId > clientId
+  const deviceId = client.deviceId || client.micId || clientId;
+  const dev = room.activeMics.get(deviceId);
+  
+  if (!dev) return;
+  
+  const tsNow = Date.now();
+  dev.heartbeatTs = tsNow;
+  dev.lastActivity = tsNow; // Keep backward compat
+}
+
 function upsertMicDevice(room, deviceId, patch){
   if (!room.activeMics) room.activeMics = new Map();
   const prev = room.activeMics.get(deviceId) || {};
@@ -324,31 +345,84 @@ function upsertMicDevice(room, deviceId, patch){
   return merged;
 }
 
+/**
+ * Device Truth Model - Layer 3
+ * Computes truthful device status based on actual activity signals
+ * 
+ * Status hierarchy:
+ * - OFFLINE: No heartbeat within TTL
+ * - PAUSED: Client reports paused OR mobile visibility signal
+ * - LIVE: Recent speech detected (lastSpeechTs < 3.5s)
+ * - IDLE: Streaming + heartbeat ok, but no recent speech
+ * - CONNECTED: Heartbeat ok, not streaming
+ */
 function computeDeviceStatus(dev){
   const ts = nowMs();
   const hb = dev.heartbeatTs || 0;
-  if (dev.paused) return "PAUSED";
-  if (hb && (ts - hb) <= HEARTBEAT_TTL_MS) return dev.streaming ? "LIVE" : "CONNECTED";
-  return "OFFLINE";
+  const lastSpeechTs = dev.lastSpeechTs || 0;
+  const lastAudioTs = dev.lastAudioTs || 0;
+  
+  // OFFLINE: No heartbeat within TTL (12s)
+  if (!hb || (ts - hb) > HEARTBEAT_TTL_MS) {
+    return "OFFLINE";
+  }
+  
+  // PAUSED: Client reports paused OR mobile visibility signal
+  if (dev.paused) {
+    return "PAUSED";
+  }
+  
+  // LIVE: Recent speech detected (within 3.5s)
+  // Speech is defined as audio with RMS above threshold (tracked via lastSpeechTs)
+  if (lastSpeechTs && (ts - lastSpeechTs) < 3500) {
+    return "LIVE";
+  }
+  
+  // IDLE: Streaming + heartbeat ok, but no recent speech
+  // Device is active but not currently speaking
+  if (dev.streaming && lastAudioTs && (ts - lastAudioTs) < 10000) {
+    return "IDLE";
+  }
+  
+  // CONNECTED: Heartbeat ok, not streaming
+  // Device is connected but not actively sending audio
+  return "CONNECTED";
 }
 
+/**
+ * Build device list with truth model fields
+ * Returns devices with accurate status and activity tracking
+ */
 function buildDeviceList(room){
   const devices = [];
   if (room.activeMics && room.activeMics.size){
     for (const [deviceId, dev] of room.activeMics.entries()){
+      const status = computeDeviceStatus(dev);
       const lastSeen = dev.heartbeatTs || dev.lastActivity || dev.connectedAt || 0;
+      
       devices.push({
         deviceId,
         name: dev.name || "Mic",
-        status: computeDeviceStatus(dev),
+        status, // Computed from truth model
         streaming: !!dev.streaming,
         paused: !!dev.paused,
-        lastSeen
+        // Truth model fields
+        heartbeatTs: dev.heartbeatTs || null,
+        lastAudioTs: dev.lastAudioTs || null,
+        lastSpeechTs: dev.lastSpeechTs || null,
+        lastSeen,
+        // Metadata
+        connectedAt: dev.connectedAt || lastSeen
       });
     }
   }
-  const rank = { LIVE:0, CONNECTED:1, PAUSED:2, OFFLINE:3 };
-  devices.sort((a,b) => (rank[a.status]-rank[b.status]) || (b.lastSeen-a.lastSeen));
+  // Sort by status priority, then by recency
+  const rank = { LIVE: 0, IDLE: 1, CONNECTED: 2, PAUSED: 3, OFFLINE: 4 };
+  devices.sort((a,b) => {
+    const statusDiff = (rank[a.status] || 99) - (rank[b.status] || 99);
+    if (statusDiff !== 0) return statusDiff;
+    return (b.lastSeen || 0) - (a.lastSeen || 0);
+  });
   return devices;
 }
 
@@ -660,6 +734,8 @@ class Room {
     // lastTranscript: last time a transcript was successfully produced (indicates "heard")
     this.activeMics = new Map(); // micId -> { clientId, name, status, lastActivity, connectedAt, lastTranscript, streaming, heartbeatTs, paused }
     this.micHealthTimer = null; // Timer to update mic health status
+    // Room Signal Engine (RSE) - backend truth discipline
+    this.rse = new RoomSignalEngine(this.code);
   }
 
   // Ensure there is a current topic segment to write into
@@ -709,13 +785,14 @@ class Room {
     return clamp01(conf);
   }
 
-  addClient(clientId, role, name, ws, micId = null) {
+  addClient(clientId, role, name, ws, micId = null, deviceId = null) {
     const micIdFinal = micId || clientId; // Use provided micId or fallback to clientId
     this.clients.set(clientId, {
       role,
       name,
       ws,
       micId: micIdFinal,
+      deviceId: deviceId || null, // Device Truth Model: store deviceId for tracking
       joinedAt: Date.now(),
       lastSeen: Date.now(),
       // Fragment caches for browsers that send non-standalone chunks
@@ -724,14 +801,23 @@ class Room {
     });
     
     // Track mic node for multi-location architecture
-    if (role === 'mic') {
-      this.activeMics.set(micIdFinal, {
+    // Use deviceId if provided, otherwise use micId for backward compatibility
+    const trackingId = deviceId || micIdFinal;
+    if (role === 'mic' && trackingId) {
+      const existing = this.activeMics.get(trackingId) || {};
+      this.activeMics.set(trackingId, {
         clientId,
         name: sanitizeName(name),
         status: 'connected', // connected, quiet, disconnected
         lastActivity: Date.now(),
-        connectedAt: Date.now(),
-        lastTranscript: null
+        connectedAt: existing.connectedAt || Date.now(),
+        lastTranscript: null,
+        // Device Truth Model fields
+        heartbeatTs: existing.heartbeatTs || Date.now(),
+        lastAudioTs: existing.lastAudioTs || null,
+        lastSpeechTs: existing.lastSpeechTs || null,
+        streaming: false,
+        paused: false
       });
       this.broadcastMicHealth();
     }
@@ -1109,6 +1195,26 @@ function buildTranscriptText(transcripts) {
 }
 
 /**
+ * B1: Get recent RSE segments as text for Read-the-Room
+ * Returns filtered, quality-checked segments from RSE
+ */
+function getRecentRseText(room, nowMs, lookbackMs = 5 * 60 * 1000) {
+  if (!room?.rse?.getSegments) return { text: '', segments: [] };
+
+  const since = nowMs - lookbackMs;
+  const segments = room.rse.getSegments(since) || [];
+
+  // Filter out weak/empty segments (tunable)
+  const usable = segments
+    .filter(s => s?.text && s.text.trim().length >= 3)
+    .filter(s => typeof s.qualityScore !== 'number' || s.qualityScore >= 0.35);
+
+  const text = usable.map(s => s.text.trim()).join('\n');
+
+  return { text, segments: usable };
+}
+
+/**
  * Estimate token count (rough approximation: ~4 chars per token)
  */
 function estimateTokens(text) {
@@ -1476,30 +1582,176 @@ Respond in JSON:
 }
 
 /**
+ * Read-the-Room Scoring Framework
+ * Self-grading rubric for deterministic quality control
+ */
+function getReadRoomScoringRubric() {
+  return `
+# Read-the-Room Scoring Rubric (100 points total)
+
+## 1. Factual Grounding (25 points)
+- 25: All statements directly supported by transcript
+- 20: Minor inference, clearly framed as tone/context
+- 10: One or two speculative claims
+- 0: Identity assumptions, invented facts, or hallucinations
+
+**Automatic penalties:**
+- -10: Asserting identity ("is a comedian", "is a professional")
+- -10: Naming motivations not expressed
+- -15: Introducing places/events not in transcript
+
+**Pass rule:** No identity claims unless explicitly stated by speaker.
+
+## 2. Situational Awareness (20 points)
+- 20: Clear sense of activity, environment, and constraints
+- 15: Activity clear, environment implied
+- 8: Vague or generic
+- 0: Could apply to almost any conversation
+
+**Checklist:** What are they doing? Where (broadly)? Under what conditions?
+
+## 3. Emotional & Cognitive Tone (15 points)
+- 15: Tone described accurately (calm, tense, focused, relaxed)
+- 10: Tone mentioned but weak
+- 5: Neutral but safe
+- 0: Emotional claims without evidence
+
+**Allowed:** calm, practical, light-hearted, focused, cautious, tired, alert
+**Disallowed:** anxious, angry, joyful, stressed (unless explicit)
+
+## 4. Relevance Filtering (15 points)
+- 15: Key themes surfaced, trivia compressed
+- 10: Some over-detail, still readable
+- 5: Ingredient-list syndrome
+- 0: Raw transcript paraphrase
+
+**Rule:** Details must serve context, not completeness.
+
+## 5. Structural Clarity (15 points)
+- 15: Clean sections, logical flow, consistent language
+- 10: Mostly clear, some clutter
+- 5: Wall of text
+- 0: Confusing or disorganized
+
+**Required sections:** Overview, Key Points, Decisions (if any), Next Steps (if any)
+
+## 6. Usefulness for Deaf/HoH Users (10 points)
+- 10: Provides orientation, reassurance, and context
+- 7: Informative but flat
+- 3: Informative but stressful
+- 0: Raises new confusion
+
+**Bonus (+3, capped at 10):** Includes a Room Signal one-liner
+
+## Score Interpretation:
+- 90-100: Excellent - Ship
+- 80-89: Strong - Ship
+- 70-79: Acceptable - Optional polish
+- 55-69: Weak - Rewrite pass required
+- <55: Unsafe - Regenerate required
+`;
+}
+
+/**
+ * Self-grading prompt for Read-the-Room summaries
+ */
+function getSelfGradingPrompt(summary, transcriptText) {
+  return `${getStandardPromptPreamble()}
+
+You have generated a Read-the-Room summary. Now you must self-grade it using the scoring rubric.
+
+${getReadRoomScoringRubric()}
+
+## Your Generated Summary:
+${JSON.stringify(summary, null, 2)}
+
+## Original Transcript (for verification):
+${transcriptText.substring(0, 5000)}${transcriptText.length > 5000 ? '...' : ''}
+
+## Self-Grading Task:
+
+1. Score each category (1-6) based on the rubric
+2. List any deductions explicitly
+3. Calculate total score
+4. If score < 70, provide a revised summary that addresses the issues
+5. If score >= 70, confirm the summary is acceptable
+
+Return ONLY a JSON object:
+{
+  "scores": {
+    "factual_grounding": <0-25>,
+    "situational_awareness": <0-20>,
+    "emotional_tone": <0-15>,
+    "relevance_filtering": <0-15>,
+    "structural_clarity": <0-15>,
+    "usefulness": <0-10>
+  },
+  "total_score": <0-100>,
+  "deductions": ["deduction 1", "deduction 2", ...],
+  "needs_revision": <true|false>,
+  "revised_summary": {
+    "overview": "...",
+    "key_points": [...],
+    "decisions": [...],
+    "next_steps": [...]
+  } // Only include if needs_revision is true
+}`;
+}
+
+/**
  * "Read the Room" function - full overview of all transcripts
  * 
  * Generates a comprehensive summary of the entire conversation using hierarchical chunking
  * for long meetings. Returns overview, key_points, decisions, and next_steps.
  * 
+ * Now includes self-grading and self-correction based on formal scoring rubric.
+ * 
  * @param {Room} room - The room object containing transcripts
  * @param {Object} opts - Optional parameters
  * @param {number} opts.maxTokensPerChunk - Maximum tokens per chunk (default: 30000)
- * @returns {Promise<Object>} Summary object with overview, key_points, decisions, next_steps, and segmentCount
+ * @param {boolean} opts.enableSelfGrading - Enable self-grading and correction (default: true)
+ * @returns {Promise<Object>} Summary object with overview, key_points, decisions, next_steps, segmentCount, and score
  */
 async function generateReadRoomSummary(room, opts = {}) {
-  if (room.transcripts.length === 0) {
-    return {
-      overview: 'No conversation yet. Start speaking to generate a full overview.',
-      key_points: [],
-      decisions: [],
-      next_steps: [],
-      segmentCount: 0
-    };
+  const nowMs = Date.now();
+  
+  // B1: Get source text from RSE segments or fallback to transcripts
+  let sourceText = '';
+  let sourceMeta = { mode: 'transcripts', segmentCount: 0 };
+  
+  if (USE_RSE_FOR_RTR) {
+    const { text, segments } = getRecentRseText(room, nowMs, 5 * 60 * 1000);
+    if (text && text.length >= 10) {
+      sourceText = text;
+      sourceMeta = { mode: 'rse_segments', segmentCount: segments.length };
+    }
   }
+  
+  // Fallback if RSE empty or flag disabled
+  if (!sourceText) {
+    if (room.transcripts.length === 0) {
+      return {
+        overview: 'No conversation yet. Start speaking to generate a full overview.',
+        key_points: [],
+        decisions: [],
+        next_steps: [],
+        segmentCount: 0
+      };
+    }
+    sourceText = buildTranscriptText(room.transcripts);
+    sourceMeta = { mode: 'transcripts_fallback', segmentCount: 0 };
+  }
+  
+  // B2: Get confidence for gating behavior
+  const roomSignal = room.rse?.getRoomSignal ? room.rse.getRoomSignal(nowMs) : null;
+  const confidence = roomSignal?.confidence ?? 0;
+  const rseSegmentCount = sourceMeta.segmentCount ?? 0;
+  
+  // Trace log
+  logger.info(`[RTR] room=${room.code} mode=${sourceMeta.mode} segs=${sourceMeta.segmentCount} chars=${sourceText.length} conf=${confidence.toFixed(2)}`);
 
   const maxTokensPerChunk = opts.maxTokensPerChunk || 30000;
-  const fullTranscriptText = buildTranscriptText(room.transcripts);
-  const estimatedTokens = estimateTokens(fullTranscriptText);
+  const estimatedTokens = estimateTokens(sourceText);
   
   // Determine if we need chunking (use chunking if estimated tokens exceed ~80% of max)
   const needsChunking = estimatedTokens > maxTokensPerChunk * 0.8;
@@ -1511,7 +1763,22 @@ async function generateReadRoomSummary(room, opts = {}) {
     // Hierarchical summarisation: first summarize chunks, then summarize those summaries
     logger.info(`[${room.code}] Large transcript detected (est. ${estimatedTokens} tokens), using chunked summarisation`);
     
-    const chunks = chunkTranscriptsByTokens(room.transcripts, maxTokensPerChunk);
+    // B1: Chunk RSE text or fallback to transcripts
+    let chunks;
+    if (sourceMeta.mode === 'rse_segments') {
+      // Chunk RSE text by splitting into token-sized pieces
+      const words = sourceText.split(/\s+/);
+      const wordsPerChunk = Math.ceil((maxTokensPerChunk * 0.8) / 4); // ~4 chars per token, ~5 chars per word
+      chunks = [];
+      for (let i = 0; i < words.length; i += wordsPerChunk) {
+        chunks.push({
+          text: words.slice(i, i + wordsPerChunk).join(' '),
+          transcripts: [] // Not used for RSE mode
+        });
+      }
+    } else {
+      chunks = chunkTranscriptsByTokens(room.transcripts, maxTokensPerChunk);
+    }
     segmentCount = chunks.length;
     
     // Summarize each chunk
@@ -1519,9 +1786,40 @@ async function generateReadRoomSummary(room, opts = {}) {
       const chunk = chunks[i];
       logger.debug(`[${room.code}] Summarizing chunk ${i + 1}/${chunks.length} (${chunk.transcripts.length} transcripts)`);
       
+      // B2: Apply confidence-gated behavior rules
+      const isLowConfidence = confidence < 0.45 || rseSegmentCount < 3;
+      const isMediumConfidence = !isLowConfidence && confidence < 0.70;
+      const isHighConfidence = confidence >= 0.70;
+      
+      let behaviorInstructions = '';
+      if (isLowConfidence) {
+        behaviorInstructions = `
+**LOW CONFIDENCE MODE (confidence: ${confidence.toFixed(2)})**
+- Use factual language only
+- No emotional/tone claims
+- Allow uncertainty words: "appears", "likely", "seems"
+- Keep overview short and factual
+- Extract fewer key points
+- No "Room Signal" line`;
+      } else if (isMediumConfidence) {
+        behaviorInstructions = `
+**MEDIUM CONFIDENCE MODE (confidence: ${confidence.toFixed(2)})**
+- Normal overview + key points
+- Tone allowed only if hedged (e.g., "tone seems practical")
+- Decisions/Next Steps allowed`;
+      } else {
+        behaviorInstructions = `
+**HIGH CONFIDENCE MODE (confidence: ${confidence.toFixed(2)})**
+- Include "Room Signal" one-liner if applicable
+- Include tone line
+- Include Decisions and Next Steps if present`;
+      }
+      
       const chunkPrompt = `${getStandardPromptPreamble()}
 
 Provide a comprehensive summary of this conversation segment. Extract key themes, decisions, topics, and action items.
+
+${behaviorInstructions}
 
 Transcript segment:
 ${chunk.text}
@@ -1570,9 +1868,51 @@ Return ONLY a JSON object:
       .map((chunk, idx) => `Segment ${idx + 1}:\nOverview: ${chunk.overview}\nKey Points: ${chunk.key_points.join(', ')}\nDecisions: ${chunk.decisions.join(', ')}\nNext Steps: ${chunk.next_steps.join(', ')}`)
       .join('\n\n');
     
+    // B2: Apply confidence-gated behavior for final synthesis
+    const isLowConfidence = confidence < 0.45 || rseSegmentCount < 3;
+    const isMediumConfidence = !isLowConfidence && confidence < 0.70;
+    const isHighConfidence = confidence >= 0.70;
+    
+    let behaviorInstructions = '';
+    if (isLowConfidence) {
+      behaviorInstructions = `
+**LOW CONFIDENCE MODE (confidence: ${confidence.toFixed(2)})**
+- Use factual language only
+- No emotional/tone claims
+- Allow uncertainty words: "appears", "likely", "seems"
+- Keep overview short and factual
+- Extract fewer key points
+- No "Room Signal" line`;
+    } else if (isMediumConfidence) {
+      behaviorInstructions = `
+**MEDIUM CONFIDENCE MODE (confidence: ${confidence.toFixed(2)})**
+- Normal overview + key points
+- Tone allowed only if hedged (e.g., "tone seems practical")
+- Decisions/Next Steps allowed`;
+    } else {
+      behaviorInstructions = `
+**HIGH CONFIDENCE MODE (confidence: ${confidence.toFixed(2)})**
+- Include "Room Signal" one-liner if applicable
+- Include tone line
+- Include Decisions and Next Steps if present`;
+    }
+    
     const finalPrompt = `${getStandardPromptPreamble()}
 
 Synthesize a comprehensive overview of this entire conversation from the following segment summaries. Combine themes, merge duplicate points, and create a unified summary.
+
+${getReadRoomScoringRubric()}
+
+${behaviorInstructions}
+
+**CRITICAL RULES:**
+- Only state facts directly supported by the transcript
+- Never assert identity ("is a comedian", "is a professional") unless explicitly stated
+- Never name motivations not expressed
+- Never introduce places/events not in transcript
+- Describe tone accurately (calm, practical, focused) - avoid mind-reading (anxious, angry, stressed)
+- Focus on what matters, not everything
+- Structure clearly: Overview, Key Points, Decisions, Next Steps
 
 Segment summaries:
 ${chunkSummaryText}
@@ -1598,13 +1938,20 @@ Return ONLY a JSON object:
       );
 
       const result = JSON.parse(completion.choices[0].message.content);
-      return {
+      const initialSummary = {
         overview: clampSummary(result.overview || 'No overview available.', 500),
         key_points: clampArray(result.key_points || [], 10),
         decisions: clampArray(result.decisions || [], 10),
         next_steps: clampArray(result.next_steps || [], 10),
         segmentCount
       };
+      
+      // Self-grading and correction (if enabled)
+      if (opts.enableSelfGrading !== false) {
+        return await selfGradeAndCorrect(initialSummary, chunkSummaryText, room.code);
+      }
+      
+      return initialSummary;
     } catch (error) {
       logger.error(`[${room.code}] Error synthesizing final summary:`, error.message);
       // Fallback: combine chunk summaries manually
@@ -1626,12 +1973,54 @@ Return ONLY a JSON object:
     }
   } else {
     // Single-pass summarisation for smaller transcripts
+    // B2: Apply confidence-gated behavior
+    const isLowConfidence = confidence < 0.45 || rseSegmentCount < 3;
+    const isMediumConfidence = !isLowConfidence && confidence < 0.70;
+    const isHighConfidence = confidence >= 0.70;
+    
+    let behaviorInstructions = '';
+    if (isLowConfidence) {
+      behaviorInstructions = `
+**LOW CONFIDENCE MODE (confidence: ${confidence.toFixed(2)})**
+- Use factual language only
+- No emotional/tone claims
+- Allow uncertainty words: "appears", "likely", "seems"
+- Keep overview short and factual
+- Extract fewer key points
+- No "Room Signal" line`;
+    } else if (isMediumConfidence) {
+      behaviorInstructions = `
+**MEDIUM CONFIDENCE MODE (confidence: ${confidence.toFixed(2)})**
+- Normal overview + key points
+- Tone allowed only if hedged (e.g., "tone seems practical")
+- Decisions/Next Steps allowed`;
+    } else {
+      behaviorInstructions = `
+**HIGH CONFIDENCE MODE (confidence: ${confidence.toFixed(2)})**
+- Include "Room Signal" one-liner if applicable
+- Include tone line
+- Include Decisions and Next Steps if present`;
+    }
+    
     const prompt = `${getStandardPromptPreamble()}
 
 Provide a comprehensive overview of this entire conversation. Extract key themes, decisions, topics, and action items from the full conversation.
 
+${getReadRoomScoringRubric()}
+
+${behaviorInstructions}
+
+**CRITICAL RULES:**
+- Only state facts directly supported by the transcript
+- Never assert identity ("is a comedian", "is a professional") unless explicitly stated
+- Never name motivations not expressed
+- Never introduce places/events not in transcript
+- Describe tone accurately (calm, practical, focused) - avoid mind-reading (anxious, angry, stressed)
+- Focus on what matters, not everything
+- Structure clearly: Overview, Key Points, Decisions, Next Steps
+
 Transcript:
-${fullTranscriptText}
+${sourceText}
 
 Return ONLY a JSON object:
 {
@@ -1654,13 +2043,20 @@ Return ONLY a JSON object:
       );
 
       const result = JSON.parse(completion.choices[0].message.content);
-      return {
+      const initialSummary = {
         overview: clampSummary(result.overview || 'No overview available.', 500),
         key_points: clampArray(result.key_points || [], 10),
         decisions: clampArray(result.decisions || [], 10),
         next_steps: clampArray(result.next_steps || [], 10),
         segmentCount: 1
       };
+      
+      // Self-grading and correction (if enabled)
+      if (opts.enableSelfGrading !== false) {
+        return await selfGradeAndCorrect(initialSummary, fullTranscriptText, room.code);
+      }
+      
+      return initialSummary;
     } catch (error) {
       logger.error(`[${room.code}] Read room summary error:`, error.message);
       return {
@@ -1671,6 +2067,140 @@ Return ONLY a JSON object:
         segmentCount: 0
       };
     }
+  }
+}
+
+/**
+ * Self-grade and self-correct Read-the-Room summary
+ * Implements the formal scoring framework with automatic correction
+ */
+async function selfGradeAndCorrect(summary, transcriptText, roomCode) {
+  try {
+    const gradingPrompt = getSelfGradingPrompt(summary, transcriptText);
+    
+    logger.debug(`[${roomCode}] Self-grading summary...`);
+    
+    const gradingCompletion = await withTimeout(
+      openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: gradingPrompt }],
+        temperature: 0.1, // Lower temperature for more deterministic grading
+        response_format: { type: 'json_object' }
+      }),
+      API_TIMEOUT_MS,
+      'Self-grading timeout'
+    );
+    
+    const gradingResult = JSON.parse(gradingCompletion.choices[0].message.content);
+    const totalScore = gradingResult.total_score || 0;
+    const needsRevision = gradingResult.needs_revision || totalScore < 70;
+    
+    logger.info(`[${roomCode}] Self-grade score: ${totalScore}/100`, {
+      scores: gradingResult.scores,
+      deductions: gradingResult.deductions || []
+    });
+    
+    // If score is acceptable, return original with score metadata
+    if (!needsRevision || totalScore >= 70) {
+      return {
+        ...summary,
+        score: totalScore,
+        scoreDetails: gradingResult.scores,
+        deductions: gradingResult.deductions || []
+      };
+    }
+    
+    // Score < 70: Use revised summary if provided, otherwise regenerate
+    if (gradingResult.revised_summary && totalScore >= 55) {
+      logger.info(`[${roomCode}] Using revised summary (score was ${totalScore})`);
+      const revised = gradingResult.revised_summary;
+      return {
+        overview: clampSummary(revised.overview || summary.overview, 500),
+        key_points: clampArray(revised.key_points || summary.key_points, 10),
+        decisions: clampArray(revised.decisions || summary.decisions, 10),
+        next_steps: clampArray(revised.next_steps || summary.next_steps, 10),
+        segmentCount: summary.segmentCount,
+        score: totalScore,
+        scoreDetails: gradingResult.scores,
+        deductions: gradingResult.deductions || [],
+        revised: true
+      };
+    }
+    
+    // Score < 55: Regenerate with simplified prompt
+    if (totalScore < 55) {
+      logger.warn(`[${roomCode}] Score too low (${totalScore}), regenerating with simplified prompt`);
+      return await regenerateWithSimplifiedPrompt(transcriptText, roomCode, summary.segmentCount);
+    }
+    
+    // Fallback: return original with warning
+    return {
+      ...summary,
+      score: totalScore,
+      scoreDetails: gradingResult.scores,
+      deductions: gradingResult.deductions || [],
+      warning: 'Summary scored below 70 but revision unavailable'
+    };
+    
+  } catch (error) {
+    logger.error(`[${roomCode}] Self-grading error:`, error.message);
+    // Return original summary if grading fails
+    return summary;
+  }
+}
+
+/**
+ * Regenerate summary with simplified, more conservative prompt
+ * Used when initial summary scores < 55
+ */
+async function regenerateWithSimplifiedPrompt(transcriptText, roomCode, segmentCount) {
+  const simplifiedPrompt = `${getStandardPromptPreamble()}
+
+Generate a simple, factual summary of this conversation. Be extremely conservative - only state what is explicitly in the transcript.
+
+**STRICT RULES:**
+- Only facts directly stated in transcript
+- No identity assumptions
+- No emotional mind-reading
+- No invented details
+- Simple, clear structure
+
+Transcript:
+${transcriptText.substring(0, 15000)}${transcriptText.length > 15000 ? '...' : ''}
+
+Return ONLY a JSON object:
+{
+  "overview": "A simple 2-3 sentence factual summary",
+  "key_points": ["fact 1", "fact 2", ...],
+  "decisions": ["decision 1", ...] (only if explicitly stated),
+  "next_steps": ["action 1", ...] (only if explicitly stated)
+}`;
+
+  try {
+    const completion = await withTimeout(
+      openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: simplifiedPrompt }],
+        temperature: 0.1,
+        response_format: { type: 'json_object' }
+      }),
+      API_TIMEOUT_MS,
+      'Simplified regeneration timeout'
+    );
+    
+    const result = JSON.parse(completion.choices[0].message.content);
+    return {
+      overview: clampSummary(result.overview || 'No overview available.', 500),
+      key_points: clampArray(result.key_points || [], 10),
+      decisions: clampArray(result.decisions || [], 10),
+      next_steps: clampArray(result.next_steps || [], 10),
+      segmentCount: segmentCount || 1,
+      score: null, // Don't re-grade simplified version
+      regenerated: true
+    };
+  } catch (error) {
+    logger.error(`[${roomCode}] Simplified regeneration error:`, error.message);
+    throw error;
   }
 }
 
@@ -1688,6 +2218,41 @@ async function processAudioQueue(room) {
 
   try {
     const { clientId, speaker, audioBuffer, ext, tsEnd } = chunk;
+    const tsNow = nowMs();
+    
+    // Device Truth Model: Track audio activity when chunk received
+    const client = room.clients.get(clientId);
+    if (client) {
+      // Find device by clientId's associated deviceId or micId
+      // Priority: deviceId (from heartbeat) > micId > clientId
+      const deviceId = client.deviceId || client.micId || clientId;
+      if (deviceId && room.activeMics) {
+        const dev = room.activeMics.get(deviceId);
+        if (dev) {
+          // Update lastAudioTs whenever we receive audio
+          dev.lastAudioTs = tsNow;
+          // lastSpeechTs will be updated when we detect actual speech (below)
+        } else {
+          // Device not in activeMics yet - might be first audio before heartbeat
+          // Create entry if this is a mic client
+          if (client.role === 'mic') {
+            room.activeMics.set(deviceId, {
+              clientId,
+              name: client.name || 'Mic',
+              status: 'connected',
+              lastActivity: tsNow,
+              connectedAt: tsNow,
+              lastTranscript: null,
+              heartbeatTs: tsNow, // Assume connected if sending audio
+              lastAudioTs: tsNow,
+              lastSpeechTs: null,
+              streaming: true,
+              paused: false
+            });
+          }
+        }
+      }
+    }
     
     logger.info(`[${room.code}] Processing audio chunk from ${speaker}: ${audioBuffer.length} bytes, ext=${ext}`);
     
@@ -1729,6 +2294,21 @@ async function processAudioQueue(room) {
 
       wavDur = wavDurationSeconds16kMonoPcm16le(wavBuffer);
       wavRms = wavRms16leNormalized(wavBuffer);
+      
+      // Room Signal Engine: Ingest audio chunk metadata
+      if (room.rse && wavRms !== null && typeof wavRms === 'number' && !isNaN(wavRms)) {
+        const client = room.clients.get(clientId);
+        if (client) {
+          const deviceId = client.deviceId || client.micId || clientId;
+          room.rse.ingestAudioChunk({
+            deviceId,
+            rms: wavRms,
+            timestampMs: tsEnd || Date.now(),
+            hasSpeechHint: wavRms >= MIN_WAV_RMS
+          });
+        }
+      }
+      
       if ((wavDur !== null && wavDur < MIN_WAV_SEC) || (wavRms !== null && wavRms < MIN_WAV_RMS)) {
         logger.info(
           `[${room.code}] Skipping low-signal audio from ${speaker} (dur=${wavDur?.toFixed?.(2) ?? 'n/a'}s rms=${wavRms?.toFixed?.(4) ?? 'n/a'})`
@@ -1810,6 +2390,20 @@ async function processAudioQueue(room) {
         const existing = room.promptByMic.get(micKey) || '';
         room.promptByMic.set(micKey, (existing + ' ' + text).trim().slice(-PROMPT_CONTEXT_MAX_CHARS));
 
+        // Room Signal Engine: Ingest transcript candidate
+        if (room.rse) {
+          const client = room.clients.get(clientId);
+          if (client) {
+            const deviceId = client.deviceId || client.micId || clientId;
+            room.rse.ingestTranscriptCandidate({
+              deviceId,
+              text,
+              timestampMs: tsEnd || Date.now(),
+              confidence: transcribeExt === 'wav' && wavRms !== null ? Math.min(1.0, wavRms / 0.1) : 0.8
+            });
+          }
+        }
+
         const entry = {
           id: randomBytes(8).toString('hex'),
           ts: tsEnd || Date.now(),
@@ -1823,6 +2417,30 @@ async function processAudioQueue(room) {
           const client = room.clients.get(clientId);
           if (client?.micId) {
             room.updateMicActivity(client.micId, true);
+          }
+          
+          // Device Truth Model: Track speech detection
+          // Speech detected = meaningful transcript with good audio quality
+          if (client) {
+            const deviceId = client.deviceId || client.micId || clientId;
+            if (deviceId && room.activeMics) {
+              const dev = room.activeMics.get(deviceId);
+              if (dev) {
+                // Update lastSpeechTs when we detect actual speech
+                // Speech = meaningful text + passed quality checks
+                dev.lastSpeechTs = tsEnd || Date.now();
+                // lastAudioTs already updated above when chunk received
+                
+                // Trigger device_list update to broadcast new status
+                room.broadcast({
+                  type: 'device_list',
+                  roomCode: room.code,
+                  heartbeatTtlMs: HEARTBEAT_TTL_MS,
+                  heartbeatIntervalHintMs: HEARTBEAT_INTERVAL_HINT_MS,
+                  devices: buildDeviceList(room)
+                });
+              }
+            }
           }
           
           // Broadcast transcript
@@ -1980,7 +2598,8 @@ wss.on('connection', (ws) => {
           const sanitizedName = sanitizeName(message.name || 'Mic');
           // Use micId from message if provided (for deviceId-based mic identity), otherwise use clientId
           const micId = message.micId || (message.deviceId ? `mic-${message.deviceId}` : null) || clientId;
-          room.addClient(clientId, message.role || 'mic', sanitizedName, ws, micId);
+          const deviceId = message.deviceId || null; // Extract deviceId for truth model tracking
+          room.addClient(clientId, message.role || 'mic', sanitizedName, ws, micId, deviceId);
           currentRoom = message.roomCode;
 
           // Ensure summary timer is running (rooms may be kept alive even when empty)
@@ -2029,14 +2648,29 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // Preserve existing truth model fields when updating heartbeat
+    const existing = room.activeMics?.get(deviceId) || {};
+    const clientId = ws.clientId || ws._clientId || null;
+    
+    // Link deviceId to client for truth model tracking
+    if (clientId) {
+      const client = room.clients.get(clientId);
+      if (client && !client.deviceId) {
+        client.deviceId = deviceId; // Store deviceId on client for audio tracking
+      }
+    }
+    
     const dev = upsertMicDevice(room, deviceId, {
-      clientId: ws.clientId || ws._clientId || null,
+      clientId: clientId,
       name: message.name || 'Mic',
       heartbeatTs: ts,
       lastActivity: ts,
       streaming: !!message.streaming,
       paused: !!message.paused,
-      connectedAt: (room.activeMics?.get(deviceId)?.connectedAt) || ts
+      connectedAt: existing.connectedAt || ts,
+      // Preserve truth model fields (don't overwrite with heartbeat)
+      lastAudioTs: existing.lastAudioTs || null,
+      lastSpeechTs: existing.lastSpeechTs || null
     });
 
     dev.status = computeDeviceStatus(dev);
@@ -2100,17 +2734,30 @@ case 'audio_chunk': {
           
           room.clientChunkRates.set(clientId, rate);
 
-          const b64 = message.data;
-          const mime = String(message.mime || 'audio/webm');
-          const speaker = client.name;
-          const micId = client.micId || clientId;
-          
-          logger.debug(`[${room.code}] Received audio_chunk from ${speaker} (micId: ${micId})`);
+    const b64 = message.data;
+    const mime = String(message.mime || 'audio/webm');
+    const speaker = client.name;
+    const micId = client.micId || clientId;
+    const tsNow = nowMs();
+    
+    logger.debug(`[${room.code}] Received audio_chunk from ${speaker} (micId: ${micId})`);
 
-          if (!b64 || typeof b64 !== 'string') {
-            logger.warn(`[${room.code}] Invalid audio chunk data from ${speaker}`);
-            return;
-          }
+    if (!b64 || typeof b64 !== 'string') {
+      logger.warn(`[${room.code}] Invalid audio chunk data from ${speaker}`);
+      return;
+    }
+    
+    // Device Truth Model: Track audio activity
+    // Find device by clientId or micId
+    const deviceId = client.deviceId || micId;
+    if (deviceId && room.activeMics) {
+      const dev = room.activeMics.get(deviceId);
+      if (dev) {
+        // Update lastAudioTs whenever we receive audio
+        dev.lastAudioTs = tsNow;
+        // lastSpeechTs will be updated when we detect actual speech (below)
+      }
+    }
 
           // Validate base64 string length before decoding
           const estimatedSize = (b64.length * 3) / 4;
@@ -2458,7 +3105,21 @@ case 'audio_chunk': {
         }
 
         case 'ping': {
-          ws.send(JSON.stringify({ type: 'pong' }));
+          // keepalive for Cloudflare + useful for truth model
+          ws.__lastPingTs = Date.now();
+          try {
+            ws.send(JSON.stringify({ type: 'pong', ts: message.ts || Date.now() }));
+          } catch (e) {
+            // Ignore send errors (connection may be closing)
+          }
+          
+          // Update device truth model heartbeat if roomCode provided
+          if (message.roomCode && currentRoom) {
+            const room = rooms.get(message.roomCode);
+            if (room) {
+              markDeviceHeartbeat(room, clientId);
+            }
+          }
           break;
         }
       }
@@ -3019,6 +3680,20 @@ app.get('/api/room/:code/invite-qr.png', async (req, res) => {
     return res.status(500).json({ error: e?.message || 'QR generation failed' });
   }
 });
+
+// Room Signal Engine: Tick loop (process windows every 500ms)
+setInterval(() => {
+  const now = Date.now();
+  for (const room of rooms.values()) {
+    if (room.rse) {
+      try {
+        room.rse.tick(now);
+      } catch (error) {
+        logger.error(`[${room.code}] RSE tick error:`, error.message);
+      }
+    }
+  }
+}, 500);
 
 server.listen(PORT, () => {
   logger.info(`RoomBrief server running on http://localhost:${PORT}`);
