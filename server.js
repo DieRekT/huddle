@@ -2478,10 +2478,12 @@ async function processAudioQueue(room) {
 }
 
 // WebSocket connection handler
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   const clientId = generateClientId();
   let currentRoom = null;
 
+  logger.info(`[WS] New connection: ${clientId} from ${req.socket.remoteAddress || 'unknown'}`);
+  
   ws.send(JSON.stringify({ type: 'hello', clientId }));
 
   ws.on('message', async (data) => {
