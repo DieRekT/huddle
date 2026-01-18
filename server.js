@@ -608,11 +608,61 @@ class Room {
     this.promptByMic = new Map(); // micKey (clientId) -> rolling transcript context
     this.topicHistory = []; // [{ ts, fromTopic, toTopic, confidence, fromSubtopic, toSubtopic, fromStatus, toStatus, source }]
     this.topicSummaryCache = new Map(); // key -> { summary, key_points, createdAt, startTs, endTs }
+    // Segment-based topic timeline: [{ startMs, endMs, topic, updatedAt }]
+    this.topicTimeline = [];
+    this._lastTopicSegmentStartMs = this.createdAt;
     // Multi-location architecture: track active mics
     // lastActivity: last time server received *any* audio payload (or transcript)
     // lastTranscript: last time a transcript was successfully produced (indicates "heard")
-    this.activeMics = new Map(); // micId -> { clientId, name, status, lastActivity, connectedAt, lastTranscript }
+    this.activeMics = new Map(); // micId -> { clientId, name, status, lastActivity, connectedAt, lastTranscript, streaming, heartbeatTs, paused }
     this.micHealthTimer = null; // Timer to update mic health status
+  }
+
+  // Ensure there is a current topic segment to write into
+  ensureTopicSegment(tsMs) {
+    if (!this._lastTopicSegmentStartMs) this._lastTopicSegmentStartMs = this.createdAt;
+    const segStart = this._lastTopicSegmentStartMs;
+    const TOPIC_SEGMENT_MS = 90000; // 1.5 min topic segments
+    if (tsMs - segStart < TOPIC_SEGMENT_MS && this.topicTimeline.length) return;
+    // start new segment
+    this._lastTopicSegmentStartMs = tsMs;
+    this.topicTimeline.push({
+      startMs: tsMs,
+      endMs: tsMs,
+      topic: '',
+      updatedAt: tsMs,
+    });
+  }
+
+  updateTopicForTimestamp(tsMs, topic) {
+    if (!topic) return;
+    this.ensureTopicSegment(tsMs);
+    const seg = this.topicTimeline[this.topicTimeline.length - 1];
+    if (seg) {
+      seg.endMs = Math.max(seg.endMs, tsMs);
+      seg.topic = topic;
+      seg.updatedAt = nowMs();
+    }
+  }
+
+  // Coverage-based confidence for "room.summary.confidence"
+  computeConfidence(tsMs) {
+    // Confidence depends on: active transcript density + low-duplication
+    const CONF_WINDOW_MS = 120000; // 2 min confidence window
+    const windowStart = tsMs - CONF_WINDOW_MS;
+    const items = (this.transcripts || []).filter(t => (t.ts || t.tsMs || 0) >= windowStart);
+    if (items.length === 0) return 0.1;
+    const withText = items.filter(t => normalizeText(t.text).length >= 8);
+    const coverage = withText.length / items.length;
+    // Penalize spam/dup: if too many identical-ish lines
+    let dupPairs = 0;
+    for (let i = 1; i < withText.length; i++) {
+      const sim = combinedSimilarity(withText[i - 1].text, withText[i].text);
+      if (sim >= 0.92) dupPairs++;
+    }
+    const dupRate = withText.length <= 1 ? 0 : dupPairs / (withText.length - 1);
+    const conf = 0.15 + (0.75 * coverage) - (0.35 * dupRate);
+    return clamp01(conf);
   }
 
   addClient(clientId, role, name, ws, micId = null) {
@@ -1227,6 +1277,12 @@ Respond in JSON format:
       room.summary.topicStability.pendingCount = 0;
     }
     
+    const tsNow = Date.now();
+    // Update topic timeline when topic changes or periodically
+    if (finalTopic && finalTopic !== 'Waiting for conversation' && finalTopic !== 'General discussion') {
+      room.updateTopicForTimestamp(tsNow, finalTopic);
+    }
+    
     room.summary = {
       topic: finalTopic,
       subtopic: result.subtopic || '',
@@ -1236,7 +1292,7 @@ Respond in JSON format:
       decisions: clampedDecisions,
       next_steps: clampedNextSteps,
       confidence: newConfidence,
-      lastUpdated: Date.now(),
+      lastUpdated: tsNow,
       topicStability: room.summary.topicStability
     };
 

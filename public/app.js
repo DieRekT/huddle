@@ -1941,6 +1941,13 @@ function handleMessage(message) {
             showMissedResult(message);
             break;
 
+        case 'device_list':
+            // Update device list UI from heartbeat-driven device registry
+            if (message.devices && Array.isArray(message.devices)) {
+                updateDeviceListUI(message.devices);
+            }
+            break;
+            
         case 'read_room_result':
             // If this is from a Save & Clear operation, format and copy to clipboard
             if (saveClearPending) {
@@ -2785,6 +2792,36 @@ function updateActionsCard(actions) {
             actionsList.appendChild(li);
         });
     }
+}
+
+// Update device list UI from heartbeat-driven device_list message
+function updateDeviceListUI(devices) {
+    if (!micHealthList) return;
+    
+    if (!devices || devices.length === 0) {
+        updateMicHealthStrip([]);
+        return;
+    }
+    
+    // Map device status (LIVE/CONNECTED/PAUSED/OFFLINE) to mic roster format for compatibility
+    const micRoster = devices.map(dev => {
+        const status = dev.status || 'OFFLINE';
+        // Map heartbeat status to legacy status format
+        let legacyStatus = 'quiet';
+        if (status === 'LIVE') legacyStatus = 'live';
+        else if (status === 'CONNECTED' || status === 'PAUSED') legacyStatus = 'sending';
+        else legacyStatus = 'offline';
+        
+        return {
+            name: dev.name,
+            status: legacyStatus,
+            streaming: dev.streaming,
+            lastActivity: dev.lastSeen || Date.now()
+        };
+    });
+    
+    // Use existing updateMicHealthStrip for rendering (already handles status chips)
+    updateMicHealthStrip(micRoster);
 }
 
 // Update mic health indicator strip (replaces old mic roster card)
