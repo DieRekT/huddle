@@ -3887,7 +3887,21 @@ async function startMic() {
     try {
         // Check if mediaDevices is available (Safari compatibility)
         if (!navigator || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            throw new Error('Microphone access not available in this browser');
+            const protocol = window.location.protocol;
+            const hostname = window.location.hostname;
+            const isLocalhost = hostname === 'localhost' || hostname === '127.0.0.1';
+            const isHTTPS = protocol === 'https:';
+            
+            let errorMsg = 'Microphone access requires HTTPS. ';
+            if (!isHTTPS && !isLocalhost) {
+                errorMsg += 'Please use HTTPS or access via localhost. ';
+                if (hostname.includes('192.168.') || hostname.includes('10.') || hostname.includes('172.')) {
+                    errorMsg += 'For local IP addresses, use Cloudflare tunnel (cloudflared tunnel --url http://localhost:8787) or access via localhost.';
+                }
+            } else {
+                errorMsg += 'Your browser may not support microphone access or it is disabled.';
+            }
+            throw new Error(errorMsg);
         }
         // Enable autoGainControl for iPad/iOS to boost audio signal and improve detection
         // This helps compensate for lower microphone sensitivity on mobile devices
