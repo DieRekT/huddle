@@ -1608,11 +1608,13 @@ function connectAndJoinAsViewer(code, passcode = null) {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}`;
         
+        console.log('[Diagnostic] Creating WebSocket connection:', { wsUrl, roomCode: code, role: 'viewer' });
+        
         ws = new WebSocket(wsUrl);
         
         // Set up handlers
         ws.onopen = () => {
-            console.log('WebSocket connected (viewer)');
+            console.log('[Diagnostic] WebSocket connected (viewer)', { wsUrl, readyState: ws.readyState });
             wsConnected = true;
             reconnectAttempts = 0;
             updateStatusBars();
@@ -1621,14 +1623,16 @@ function connectAndJoinAsViewer(code, passcode = null) {
             hideLoaderMinDelay();
             
             // Send join message once connected
-            ws.send(JSON.stringify({
+            const joinMessage = {
                 type: 'join',
                 roomCode: code,
                 role: 'viewer',
                 name: userName,
                 deviceId: deviceId,
                 passcode: passcode
-            }));
+            };
+            console.log('[Diagnostic] Sending join message:', joinMessage);
+            ws.send(JSON.stringify(joinMessage));
             
             // Start keepalive pings for Cloudflare-safe connection
             clearInterval(window.__viewerPingTimer);
