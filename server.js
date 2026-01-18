@@ -12,6 +12,8 @@ import { createReadStream } from 'fs';
 import { convertToWav16kMono } from './audio_convert.js';
 import QRCode from 'qrcode';
 import os from 'os';
+import { execSync } from 'child_process';
+import { readFileSync } from 'fs';
 
 dotenv.config();
 
@@ -24,6 +26,48 @@ const wss = new WebSocketServer({ server });
 
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
+
+// --- Build / version stamping (debug + deploy verification) ---
+function getGitSha() {
+  try {
+    return execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString()
+      .trim();
+  } catch {
+    return process.env.GIT_SHA || 'unknown';
+  }
+}
+
+const BUILD_SHA = getGitSha();
+const BUILD_TIME = new Date().toISOString();
+const PKG_VERSION = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf8'));
+    return pkg.version || '0.0.0';
+  } catch {
+    return process.env.PKG_VERSION || '0.0.0';
+  }
+})();
+
+// Add a header to every response so curl -I shows the deployed build
+app.use((req, res, next) => {
+  res.setHeader('x-huddle-build', BUILD_SHA);
+  res.setHeader('x-huddle-build-time', BUILD_TIME);
+  res.setHeader('x-huddle-version', PKG_VERSION);
+  next();
+});
+
+// A simple endpoint that returns version info as JSON
+app.get('/version', (req, res) => {
+  res.json({
+    name: 'huddle',
+    version: PKG_VERSION,
+    git_sha: BUILD_SHA,
+    build_time: BUILD_TIME,
+    hostname: os.hostname(),
+    node: process.version,
+  });
+});
 
 // ============================================================
 // ROUTES (Intro disabled for now)
