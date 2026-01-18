@@ -1996,6 +1996,10 @@ function handleMessage(message) {
 
         case 'device_list':
             // Update device list UI from heartbeat-driven device registry
+            // EXPOSE FULL PAYLOAD FOR DIAGNOSIS (temporary)
+            window.__lastDeviceListPayload = JSON.parse(JSON.stringify(message));
+            console.log('[DEVICE_LIST_PAYLOAD]', JSON.stringify(message, null, 2));
+            
             if (message.devices && Array.isArray(message.devices)) {
                 // Convert device_list to mic roster format for compatibility
                 const micRoster = message.devices.map(dev => ({
