@@ -1609,6 +1609,7 @@ function connectAndJoinAsViewer(code, passcode = null) {
         const wsUrl = `${protocol}//${window.location.host}`;
         
         console.log('[Diagnostic] Creating WebSocket connection:', { wsUrl, roomCode: code, role: 'viewer' });
+        console.log('[Diagnostic] WebSocket URL:', wsUrl);
         
         ws = new WebSocket(wsUrl);
         
