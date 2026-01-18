@@ -2568,8 +2568,15 @@ wss.on('connection', (ws, req) => {
         }
 
         case 'join': {
+          logger.info(`[WS] Join request from ${clientId}:`, { 
+            roomCode: message.roomCode, 
+            role: message.role,
+            name: message.name 
+          });
+          
           // Validate room code format
           if (!validateRoomCode(message.roomCode)) {
+            logger.warn(`[WS] Invalid room code format from ${clientId}:`, message.roomCode);
             ws.send(JSON.stringify({
               type: 'error',
               message: 'Invalid room code format'
@@ -2579,12 +2586,15 @@ wss.on('connection', (ws, req) => {
           
           const room = rooms.get(message.roomCode);
           if (!room) {
+            logger.warn(`[WS] Room not found: ${message.roomCode} from ${clientId}`);
             ws.send(JSON.stringify({
               type: 'error',
               message: 'Room not found'
             }));
             return;
           }
+          
+          logger.info(`[WS] Room found: ${message.roomCode}, joining as ${message.role || 'mic'}`);
           
           // Validate passcode if room has one
           if (room.passcode) {
