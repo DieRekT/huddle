@@ -717,11 +717,21 @@ async function loadActiveRooms() {
 }
 
 // Initialize intro screen if it exists
+// BUT: Skip intro if we're on a specific route (/viewer, /mic, /host)
 let routeInfo = null;
-if (introScreen) {
+const pathname = window.location.pathname;
+const shouldSkipIntro = pathname === '/viewer' || pathname === '/mic' || pathname === '/host';
+
+if (introScreen && !shouldSkipIntro) {
+    // Show intro only on / (root) or other non-route pages
     initializeIntroScreen();
 } else {
-    // No intro screen, proceed with normal flow
+    // No intro screen OR we're on a route that should skip intro
+    if (introScreen && shouldSkipIntro) {
+        // Hide intro screen if we're on a route page
+        introScreen.classList.remove('active');
+    }
+    // Proceed with normal route detection
     routeInfo = detectRouteAndInit();
 }
 
