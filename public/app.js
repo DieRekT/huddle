@@ -1,3 +1,80 @@
+// === Multi-mic reliability improvements (2026-01) ===
+const HEARTBEAT_INTERVAL_MS = 3000;
+let micHeartbeatTimer = null;
+let micStreaming = false;
+let micPaused = false;
+
+function getStableDeviceId(key = 'huddle_device_id') {
+  try {
+    let id = localStorage.getItem(key);
+    if (!id) {
+      id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : ('dev_' + Math.random().toString(16).slice(2));
+      localStorage.setItem(key, id);
+    }
+    return id;
+  } catch (e) {
+    return 'dev_' + Math.random().toString(16).slice(2);
+  }
+}
+
+function getMicDisplayName() {
+  const ua = navigator.userAgent || '';
+  const isIPad = /iPad/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isIPhone = /iPhone/.test(ua);
+  const isAndroid = /Android/.test(ua);
+  if (isIPad) return 'iPad Mic';
+  if (isIPhone) return 'iPhone Mic';
+  if (isAndroid) return 'Android Mic';
+  return 'Browser Mic';
+}
+
+function safeSend(ws, obj) {
+  try {
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify(obj));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+const micDeviceId = getStableDeviceId();
+
+function startMicHeartbeat(ws, roomCode) {
+  stopMicHeartbeat();
+  const name = getMicDisplayName();
+
+  const tick = () => {
+    safeSend(ws, {
+      type: 'mic_heartbeat',
+      roomCode,
+      deviceId: micDeviceId,
+      name,
+      streaming: !!micStreaming,
+      paused: !!micPaused,
+      tsMs: Date.now()
+    });
+  };
+
+  tick();
+  micHeartbeatTimer = setInterval(tick, HEARTBEAT_INTERVAL_MS);
+}
+
+function stopMicHeartbeat() {
+  if (micHeartbeatTimer) {
+    clearInterval(micHeartbeatTimer);
+    micHeartbeatTimer = null;
+  }
+}
+
+// Visibility: iOS/Android will pause mic in background/lock.
+document.addEventListener('visibilitychange', () => {
+  micPaused = document.visibilityState !== 'visible';
+});
+window.addEventListener('pagehide', () => { micPaused = true; });
+window.addEventListener('pageshow', () => { micPaused = document.visibilityState !== 'visible'; });
+
+
 // WebSocket connections (dual support: viewer + mic)
 let ws = null; // Viewer WebSocket (primary)
 let micWs = null; // Mic WebSocket (optional, when viewer enables mic)
@@ -1640,6 +1717,10 @@ function connectAndJoin(code, passcode = null) {
                 label: micLabel,
                 passcode: passcode
             }));
+            // Start heartbeat for mic role (start after join is sent)
+            if (currentRole === 'mic') {
+                startMicHeartbeat(ws, code);
+            }
         };
         
         ws.onmessage = (event) => {
@@ -1667,6 +1748,7 @@ function connectAndJoin(code, passcode = null) {
             wsConnected = false;
             updateStatusBars();
             hideLoaderMinDelay();
+            stopMicHeartbeat();
             
             if (currentRoom && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                 const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
@@ -3793,6 +3875,7 @@ async function startMic() {
                 realtimeMicInitialized = true;
                 await window.RealtimeMic.start();
                 useRealtimeMode = true;
+                micStreaming = true;
                 
                 startMicBtn.style.display = 'none';
                 stopMicBtn.style.display = 'block';
@@ -3904,6 +3987,7 @@ async function startMic() {
         
         // Record in ~5s chunks for better phoneme continuity and word boundaries - VAD filters silence so cost stays low
         mediaRecorder.start(TIMESLICE_MS);
+        micStreaming = true;
         
         console.log('MediaRecorder started, state:', mediaRecorder.state);
         console.log('Audio stream active:', audioStream.active);
@@ -4041,6 +4125,7 @@ function stopMic() {
             mediaRecorder.stop();
         }
     }
+    micStreaming = false;
     
     if (audioStream) {
         audioStream.getTracks().forEach(track => {
@@ -4374,6 +4459,8 @@ async function enableMicFromViewer() {
                 label: micLabel,
                 passcode: passcode
             }));
+            // Start heartbeat after join
+            startMicHeartbeat(micWs, currentRoom);
         };
         
         micWs.onmessage = (event) => {
@@ -4401,6 +4488,7 @@ async function enableMicFromViewer() {
         
         micWs.onclose = () => {
             console.log('Mic WebSocket closed');
+            stopMicHeartbeat();
             if (isMicEnabled) {
                 // Reconnect if mic is still enabled
                 setTimeout(() => {
@@ -4516,6 +4604,7 @@ async function startMicFromViewer() {
         
         mediaRecorder.start(TIMESLICE_MS);
         setupVAD(audioStream);
+        micStreaming = true;
         
         isMicEnabled = true;
         isMicMuted = false;

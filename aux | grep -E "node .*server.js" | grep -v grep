@@ -1,0 +1,5 @@
+[33m01f77ba[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mfix/remove-intro-loop[m[33m)[m Fix: remove intro loop; make / and /viewer stable
+[33med8a0aa[m fix: Show transcript card on mic page when recording starts
+[33mb88319f[m fix: Add missing applyFlocking function for particle animation
+[33m4ef3a5e[m fix: Ensure both mics have unique speaker names and add better audio logging
+[33m63cf4b6[m fix: Boost iPad/iOS microphone input with Web Audio gain node
