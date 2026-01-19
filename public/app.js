@@ -264,6 +264,14 @@ const readRoomNextSteps = document.getElementById('readRoomNextSteps');
 const readRoomDecisionsSection = document.getElementById('readRoomDecisionsSection');
 const readRoomNextStepsSection = document.getElementById('readRoomNextStepsSection');
 
+// Viewer awareness dock elements
+const primaryStatusLine = document.getElementById('primaryStatusLine');
+const secondaryAttentionLine = document.getElementById('secondaryAttentionLine');
+const coverageState = document.getElementById('coverageState');
+const coverageReason = document.getElementById('coverageReason');
+const degradedChip = document.getElementById('degradedChip');
+const catchUpDegraded = document.getElementById('catchUpDegraded');
+
 // Onboarding banner elements
 const onboardingBanner = document.getElementById('onboardingBanner');
 const dismissOnboardingBtn = document.getElementById('dismissOnboardingBtn');
@@ -303,6 +311,12 @@ const viewerPromptCopyMicLinkBtn = document.getElementById('viewerPromptCopyMicL
 // Accessibility controls
 const fontSizeToggle = document.getElementById('fontSizeToggle');
 const highContrastToggle = document.getElementById('highContrastToggle');
+const fontSizeDownBtn = document.getElementById('fontSizeDownBtn');
+const fontSizeUpBtn = document.getElementById('fontSizeUpBtn');
+
+// Connection status chip
+const connectionStatusText = document.getElementById('connectionStatusText');
+const connectionStatusDot = document.getElementById('connectionStatusDot');
 
 // Invite modal (QR)
 const btnInvite = document.getElementById('btnInvite');
@@ -553,6 +567,20 @@ function updateStatusBars() {
     // Viewer
     if (viewerWsStatus && viewerWsDot) {
         setDot(viewerWsDot, wsConnected, viewerWsStatus, wsConnected ? 'connected' : (currentRoom ? 'reconnecting…' : 'disconnected'));
+    }
+    if (connectionStatusText) {
+        if (wsConnected) {
+            connectionStatusText.textContent = 'Live';
+        } else if (currentRoom) {
+            connectionStatusText.textContent = 'Reconnecting…';
+        } else {
+            connectionStatusText.textContent = 'Offline';
+        }
+    }
+    const connectionChip = connectionStatusText?.closest('.connection-chip');
+    if (connectionChip) {
+        connectionChip.classList.toggle('is-reconnecting', !wsConnected && !!currentRoom);
+        connectionChip.classList.toggle('is-offline', !wsConnected && !currentRoom);
     }
     if (viewerMicsStatus) {
         viewerMicsStatus.textContent = String((lastMicRoster || []).length || 0);
@@ -1457,7 +1485,7 @@ function truncateText(s, max = 120) {
 }
 
 function updateLiveNow() {
-    if (!liveNowRow || !liveNowText || !liveNowMeta) return;
+    if (!liveNowText) return;
     if (currentRole !== 'viewer') return;
 
     const last = transcriptEntries && transcriptEntries.length ? transcriptEntries[transcriptEntries.length - 1] : null;
@@ -1466,13 +1494,23 @@ function updateLiveNow() {
     const speaker = String(last?.speaker || '').trim();
 
     if (!ts || !text) {
-        liveNowRow.style.display = 'none';
+        liveNowText.textContent = 'Listening…';
+        if (liveNowMeta) {
+            liveNowMeta.textContent = '';
+        }
+        if (liveNowRow) {
+            liveNowRow.style.display = 'none';
+        }
         return;
     }
 
-    liveNowRow.style.display = 'flex';
     liveNowText.textContent = truncateText(`${speaker ? speaker + ': ' : ''}${text}`, 140);
-    liveNowMeta.textContent = timeAgoShort(Date.now() - ts);
+    if (liveNowMeta) {
+        liveNowMeta.textContent = `• ${timeAgoShort(Date.now() - ts)}`;
+    }
+    if (liveNowRow) {
+        liveNowRow.style.display = 'none';
+    }
 }
 
 function startLiveNowTimer() {
@@ -2301,6 +2339,10 @@ function showViewerScreen() {
     // Viewer onboarding (read-only banner) + admin UI toggle
     initOnboardingBanner();
     updateAdminUI();
+
+    if (catchUpPanel) {
+        catchUpPanel.style.display = 'block';
+    }
     
     // Update role module UI (reset to viewer-only on screen show if not enabled)
     if (currentRole === 'viewer' && !isMicEnabled) {
@@ -2583,6 +2625,81 @@ function getSummaryPlaceholder(listeningStatus) {
     }
 }
 
+function computeMicActivityStats(micRoster) {
+    const now = Date.now();
+    const stats = {
+        micCount: 0,
+        activeCount: 0,
+        liveCount: 0
+    };
+
+    if (!Array.isArray(micRoster)) return stats;
+    stats.micCount = micRoster.length;
+
+    micRoster.forEach(mic => {
+        const truthStatus = normalizeTruthStatus(mic);
+        const lastSeen = mic?.lastSeen || mic?.joinedAt || 0;
+        const isActive = truthStatus !== 'OFFLINE' || (lastSeen && (now - lastSeen) < 30000);
+        if (isActive) stats.activeCount += 1;
+        if (truthStatus === 'LIVE') stats.liveCount += 1;
+    });
+
+    return stats;
+}
+
+function updateAwarenessDock(listeningStatus) {
+    if (!primaryStatusLine && !secondaryAttentionLine && !coverageState && !coverageReason) return;
+
+    const stats = computeMicActivityStats(lastMicRoster);
+    let primary = 'Quiet';
+    let secondary = 'Nothing you need to respond to';
+
+    if (stats.liveCount >= 2) {
+        primary = 'Multiple voices';
+        secondary = 'You may want to look up';
+    } else if (stats.liveCount === 1) {
+        primary = 'Someone speaking';
+        secondary = 'Someone may be speaking to you';
+    } else if (stats.activeCount >= 2) {
+        primary = 'Group discussion';
+        secondary = 'You may want to look up';
+    }
+
+    if (primaryStatusLine) primaryStatusLine.textContent = primary;
+    if (secondaryAttentionLine) secondaryAttentionLine.textContent = secondary;
+
+    let reasonText = '';
+    if (coverageState) {
+        if (stats.micCount === 0) {
+            coverageState.textContent = 'Limited';
+            reasonText = 'No microphones connected';
+        } else if (stats.activeCount >= 2) {
+            coverageState.textContent = 'Good';
+            reasonText = 'Multiple mics active';
+        } else if (stats.activeCount === 1) {
+            coverageState.textContent = 'Partial';
+            reasonText = 'Single mic active';
+        } else {
+            coverageState.textContent = 'Limited';
+            reasonText = 'Mics inactive';
+        }
+    }
+
+    if (coverageReason) {
+        coverageReason.textContent = reasonText ? `• ${reasonText}` : '';
+    }
+
+    const secondsSinceTranscript = lastTranscriptAt ? Math.floor((Date.now() - lastTranscriptAt) / 1000) : null;
+    const isDegraded = stats.activeCount > 0 && secondsSinceTranscript !== null && secondsSinceTranscript > 45;
+
+    if (degradedChip) {
+        degradedChip.style.display = isDegraded ? 'inline-flex' : 'none';
+    }
+    if (catchUpDegraded) {
+        catchUpDegraded.style.display = isDegraded ? 'inline-flex' : 'none';
+    }
+}
+
 function updateTopicDisplay(status, summary) {
     // This function is deprecated - use updateSituationCard instead
     // But keep for compatibility
@@ -2667,7 +2784,9 @@ function updateRoomState(room) {
         updateSituationCard(status, null);
         updateSummaryDisplay(status, null);
         updateKeyPointsCard([]);
+        updateDecisionsCard([]);
         updateActionsCard([]);
+        updateAwarenessDock(status);
         return;
     }
     
@@ -2688,6 +2807,9 @@ function updateRoomState(room) {
         ? summary.key_points 
         : (summary.decisions || []);
     updateKeyPointsCard(keyPoints);
+
+    // Update decisions list (max 6 bullets)
+    updateDecisionsCard(summary.decisions || []);
     
     // Update ACTIONS card (max 3 bullets from next_steps)
     const actions = (summary.next_steps || []).slice(0, 3);
@@ -2699,6 +2821,8 @@ function updateRoomState(room) {
         // BUGFIX: Update lastMicRoster so status detection works correctly
         lastMicRoster = room.micRoster;
     }
+
+    updateAwarenessDock(listeningStatus);
     
     // Update mic page room status (multi-location architecture)
     updateMicRoomStatus(room);
@@ -2877,6 +3001,25 @@ function updateKeyPointsCard(keyPoints) {
             const li = document.createElement('li');
             li.textContent = item;
             keyPointsList.appendChild(li);
+        });
+    }
+}
+
+// Update decisions list
+function updateDecisionsCard(decisions) {
+    if (!decisionsList) return;
+
+    decisionsList.innerHTML = '';
+    if (!decisions || decisions.length === 0) {
+        const li = document.createElement('li');
+        li.className = 'empty-state';
+        li.textContent = 'No decisions detected.';
+        decisionsList.appendChild(li);
+    } else {
+        decisions.slice(0, 6).forEach(item => {
+            const li = document.createElement('li');
+            li.textContent = item;
+            decisionsList.appendChild(li);
         });
     }
 }
@@ -3269,6 +3412,7 @@ function updateListeningStatus() {
         const status = getListeningStatus(null, lastTranscriptAt, lastMicRoster, transcriptEntries);
         updateTopicDisplay(status, null);
         updateSummaryDisplay(status, null);
+        updateAwarenessDock(status);
     }
 }
 
@@ -3921,7 +4065,8 @@ if (zenModeToggle) {
     if (transcriptToggle) {
         // Default: expanded (so "What's Being Said" actually shows content without extra clicks)
         const stored = localStorage.getItem('huddle_transcript_expanded');
-        let transcriptExpanded = stored === null ? true : stored === 'true';
+        const prefersCollapsed = window.matchMedia && window.matchMedia('(max-width: 1023px)').matches;
+        let transcriptExpanded = stored === null ? !prefersCollapsed : stored === 'true';
         transcriptToggle.addEventListener('click', () => {
             transcriptExpanded = !transcriptExpanded;
             localStorage.setItem('huddle_transcript_expanded', transcriptExpanded.toString());
@@ -5201,7 +5346,19 @@ function updateFontSize() {
     if (fontSizeToggle) {
         fontSizeToggle.textContent = `Font size: ${fontSizeLabels[currentFontSize]}`;
     }
+    if (fontSizeDownBtn) {
+        fontSizeDownBtn.disabled = currentFontSize === 'normal';
+    }
+    if (fontSizeUpBtn) {
+        fontSizeUpBtn.disabled = currentFontSize === 'xlarge';
+    }
     localStorage.setItem('huddle_fontSize', currentFontSize);
+}
+
+function setFontSize(nextSize) {
+    if (!fontSizes.includes(nextSize)) return;
+    currentFontSize = nextSize;
+    updateFontSize();
 }
 
 if (fontSizeToggle) {
@@ -5211,6 +5368,22 @@ if (fontSizeToggle) {
         updateFontSize();
     });
     updateFontSize(); // Initialize on load
+}
+
+if (fontSizeDownBtn) {
+    fontSizeDownBtn.addEventListener('click', () => {
+        const currentIndex = fontSizes.indexOf(currentFontSize);
+        const nextIndex = Math.max(0, currentIndex - 1);
+        setFontSize(fontSizes[nextIndex]);
+    });
+}
+
+if (fontSizeUpBtn) {
+    fontSizeUpBtn.addEventListener('click', () => {
+        const currentIndex = fontSizes.indexOf(currentFontSize);
+        const nextIndex = Math.min(fontSizes.length - 1, currentIndex + 1);
+        setFontSize(fontSizes[nextIndex]);
+    });
 }
 
 // High contrast toggle
@@ -5235,4 +5408,3 @@ if (highContrastToggle) {
     });
     updateHighContrast(); // Initialize on load
 }
-
