@@ -87,7 +87,13 @@ function safeNextPath(next) {
 
 // Intro entry point (supports ?next=...)
 app.get('/intro', (req, res) => {
-  res.sendFile(join(__dirname, 'public', 'intro.html'));
+  const next = req.query?.next;
+  if (next) {
+    // Back-compat: /intro?next=/viewer?room=ABC123
+    return res.sendFile(join(__dirname, 'public', 'intro.html'));
+  }
+  // Canonical entry is `/`
+  return res.redirect('/');
 });
 
 // Route handlers (must be before static middleware)
