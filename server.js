@@ -71,32 +71,33 @@ app.get('/version', (req, res) => {
 });
 
 // ============================================================
-// ROUTES (Intro disabled for now)
+// ROUTES (Intro enabled)
 // ============================================================
 
 function safeNextPath(next) {
-  if (!next) return '/';
+  if (!next) return '/rooms';
   let decoded = String(next);
   try {
     decoded = decodeURIComponent(decoded);
   } catch {}
-  if (!decoded.startsWith('/')) return '/';
-  if (decoded.startsWith('/intro')) return '/';
+  if (!decoded.startsWith('/')) return '/rooms';
+  if (decoded.startsWith('/intro')) return '/rooms';
   return decoded;
 }
 
-// Back-compat: old /intro links immediately redirect to their target.
+// Intro entry point (supports ?next=...)
 app.get('/intro', (req, res) => {
-  const next = safeNextPath(req.query?.next);
-  const hasQuery = next.includes('?');
-  const url = `${next}${hasQuery ? '&' : '?'}skipIntro=1`;
-  res.redirect(url);
+  res.sendFile(join(__dirname, 'public', 'intro.html'));
 });
 
 // Route handlers (must be before static middleware)
 app.get('/', (req, res) => {
-  // Default entry point: show the main join/create screen
-  res.sendFile(join(__dirname, 'public', 'index.html'));
+  // Default entry point: show the intro animation
+  res.sendFile(join(__dirname, 'public', 'intro.html'));
+});
+
+app.get('/rooms', (req, res) => {
+  res.sendFile(join(__dirname, 'public', 'rooms.html'));
 });
 
 // Avoid noisy 404s in browser console (we ship an SVG favicon, not .ico)
@@ -3716,4 +3717,3 @@ server.listen(PORT, () => {
   logger.info(`API timeout: ${API_TIMEOUT_MS}ms`);
   logger.info(`Log level: ${LOG_LEVEL}`);
 });
-

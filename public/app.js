@@ -654,12 +654,12 @@ function detectRouteAndInit() {
         if (joinScreen) joinScreen.style.display = 'none';
         return { route: 'viewer', room, passcode };
     } else if (pathname === '/mic') {
-        // Mic route: join as mic (existing behavior)
-        if (!room || room.length !== 6) {
+        // Mic route: join as mic (room optional for new flow)
+        if (room && room.length !== 6) {
             showError('Invalid room code');
             return null;
         }
-        return { route: 'mic', room, passcode };
+        return { route: 'mic', room: room || null, passcode };
     }
     
     // Default: use existing deep-link logic
@@ -799,11 +799,10 @@ async function loadActiveRooms() {
     }
 }
 
-// Initialize intro screen if it exists
-// BUT: Skip intro if we're on a specific route (/viewer, /mic, /host)
+// Intro now lives on /intro, so skip intro on app pages.
 let routeInfo = null;
 const pathname = window.location.pathname;
-const shouldSkipIntro = pathname === '/viewer' || pathname === '/mic' || pathname === '/host';
+const shouldSkipIntro = true;
 
 if (introScreen && !shouldSkipIntro) {
     // Show intro only on / (root) or other non-route pages
@@ -955,12 +954,16 @@ async function initializeRoute() {
         
         currentRole = 'mic';
         currentRoom = routeInfo.room;
-        if (routeInfo.passcode) setRoomPasscode(routeInfo.room, routeInfo.passcode);
-        connectAndJoin(routeInfo.room, routeInfo.passcode || getRoomPasscode(routeInfo.room));
+        if (routeInfo.room) {
+            if (routeInfo.passcode) setRoomPasscode(routeInfo.room, routeInfo.passcode);
+            connectAndJoin(routeInfo.room, routeInfo.passcode || getRoomPasscode(routeInfo.room));
+        } else {
+            showMicScreen();
+        }
     }
 }
 
-// Intro is disabled; initialize routes immediately.
+// Initialize routes immediately (intro now lives on /intro).
 if (routeInfo && (routeInfo.route === 'host' || routeInfo.route === 'viewer' || routeInfo.route === 'mic')) {
     initializeRoute();
 } else {
@@ -2358,8 +2361,8 @@ async function showMicScreen() {
     if (viewerScreen) viewerScreen.classList.remove('active');
     micScreen.classList.add('active');
     
-    if (micRoomCode && currentRoom) {
-        micRoomCode.textContent = currentRoom;
+    if (micRoomCode) {
+        micRoomCode.textContent = currentRoom || '—';
     }
     if (micName && userName) {
         micName.textContent = userName;
@@ -2369,14 +2372,15 @@ async function showMicScreen() {
     updateMicIconState('idle');
     if (startMicBtn) startMicBtn.style.display = 'block';
     if (stopMicBtn) stopMicBtn.style.display = 'none';
-    if (micStatus) micStatus.textContent = 'Ready to start';
+    if (micStatus) micStatus.textContent = currentRoom ? 'Ready to start' : 'Create a room to start';
     if (micFeedback) micFeedback.style.display = 'none';
     if (micWarningBanner) micWarningBanner.style.display = 'none';
     
     // Initialize room status display (will update when state message arrives)
     if (micRoomStatusText) {
-        micRoomStatusText.textContent = 'Connecting to room...';
+        micRoomStatusText.textContent = currentRoom ? 'Connecting to room...' : 'Create a room to start sharing audio.';
     }
+    updateMicStartState();
     
     // Show transcript card (initially hidden, will show when recording starts)
     if (micTranscriptCard) {
@@ -2425,10 +2429,10 @@ async function showMicScreen() {
         document.head.appendChild(script);
     }
     
-    // Enable/disable start button based on consent
+    // Enable/disable start button based on consent + room availability
     consentCheckbox.addEventListener('change', () => {
         const isChecked = consentCheckbox.checked;
-        startMicBtn.disabled = !isChecked;
+        updateMicStartState(isChecked);
         if (isChecked && consentError) {
             consentError.style.display = 'none';
         }
@@ -2437,6 +2441,12 @@ async function showMicScreen() {
     // Pre-flight mic permission check
     checkMicPermissions();
     updateStatusBars();
+}
+
+function updateMicStartState(isConsentChecked = consentCheckbox?.checked) {
+    if (!startMicBtn) return;
+    const hasRoom = Boolean(currentRoom);
+    startMicBtn.disabled = !hasRoom || !isConsentChecked;
 }
 
 // Keep status bars fresh (ages, reconnect text)
@@ -4041,38 +4051,39 @@ if (leaveMicBtn) leaveMicBtn.addEventListener('click', () => {
     reset();
 });
 
-// Open Room button (opens viewer in new tab)
+// Open Room button (creates room if needed, then navigates to viewer)
 if (openRoomBtn) {
     openRoomBtn.addEventListener('click', async () => {
-        if (!currentRoom) {
-            showToast('No room to open', 'warn');
-            return;
-        }
+        openRoomBtn.disabled = true;
+        openRoomBtn.textContent = 'Opening...';
         try {
+            if (!currentRoom) {
+                const response = await fetch('/api/rooms', { method: 'POST' });
+                if (!response.ok) {
+                    throw new Error('Failed to create room');
+                }
+                const data = await response.json();
+                currentRoom = data.roomId;
+                try {
+                    localStorage.setItem('huddle_last_room', currentRoom);
+                } catch {}
+                if (micRoomCode) {
+                    micRoomCode.textContent = currentRoom;
+                }
+                updateMicStartState();
+            }
+
             const viewerUrl = await buildViewerLink(currentRoom);
             if (!viewerUrl) {
-                showToast('Failed to build room URL', 'error');
-                return;
+                throw new Error('Failed to build room URL');
             }
-            const newWindow = window.open(viewerUrl, '_blank');
-            if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
-                // Popup blocked - try alternative approach
-                showToast('Popup blocked. Please allow popups and try again, or copy the room code.', 'warn');
-                // Fallback: show the URL so user can copy it
-                try {
-                    await copyText(viewerUrl);
-                    showToast('Room URL copied to clipboard. Paste it in a new tab.', 'info');
-                } catch (copyError) {
-                    // If copy also fails, at least show the URL in console
-                    console.log('Room URL:', viewerUrl);
-                    showToast('Popup blocked. Check console for room URL.', 'warn');
-                }
-            } else {
-                showToast('Opening room as viewer in new tab', 'info');
-            }
+            window.location.assign(viewerUrl);
         } catch (error) {
             console.error('Error opening room:', error);
             showToast(`Failed to open room: ${error.message}`, 'error');
+        } finally {
+            openRoomBtn.disabled = false;
+            openRoomBtn.textContent = 'Open Room';
         }
     });
 }
@@ -5235,4 +5246,3 @@ if (highContrastToggle) {
     });
     updateHighContrast(); // Initialize on load
 }
-

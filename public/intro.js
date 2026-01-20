@@ -45,12 +45,12 @@ function getNextUrl() {
   
   // Validate: must be relative path starting with "/"
   if (!next || !next.startsWith('/')) {
-    return '/host'; // Safe default
+    return '/rooms'; // Safe default
   }
   
   // Ensure it's not another /intro route (prevent loop)
   if (next.startsWith('/intro')) {
-    return '/host'; // Fallback to host
+    return '/rooms'; // Fallback to rooms
   }
   
   return next;
@@ -87,7 +87,7 @@ const IntroSystem = {
   // State
   mode: 'boot',
   duration: 15000,
-  nextUrl: '/host',
+  nextUrl: '/rooms',
   didRedirect: false, // Guard against multiple redirects
   running: false,     // Guard against multiple animation loops
   rafId: 0,           // RAF ID for cancellation
