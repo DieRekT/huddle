@@ -172,22 +172,10 @@ const TIMESLICE_MS = 5000; // 5s chunks (better phoneme continuity and word boun
 
 // UI Elements
 // Support both the unified single-page app (`index.html`) and split-route pages (`host.html`, `viewer.html`, `mic.html`)
-const introScreen = document.getElementById('introScreen');
 const joinScreen = document.getElementById('joinScreen') || document.getElementById('createRoomScreen');
 const hostScreen = document.getElementById('hostScreen') || document.getElementById('hostRoomScreen');
 const viewerScreen = document.getElementById('viewerScreen');
 const micScreen = document.getElementById('micScreen');
-
-// Intro screen elements
-const introCanvas = document.getElementById('introCanvas');
-const introLogo = document.getElementById('introLogo');
-const activeRoomsPanel = document.getElementById('activeRoomsPanel');
-const activeRooms = document.getElementById('activeRooms');
-const noActiveRooms = document.getElementById('noActiveRooms');
-const introCTA = document.getElementById('introCTA');
-const letsHuddleBtn = document.getElementById('letsHuddleBtn');
-const joinRoomBtn = document.getElementById('joinRoomBtn');
-const skipIntro = document.getElementById('skipIntro');
 
 const userNameInput = document.getElementById('userName');
 const roomCodeInput = document.getElementById('roomCode');
@@ -654,12 +642,12 @@ function detectRouteAndInit() {
         if (joinScreen) joinScreen.style.display = 'none';
         return { route: 'viewer', room, passcode };
     } else if (pathname === '/mic') {
-        // Mic route: join as mic (existing behavior)
-        if (!room || room.length !== 6) {
+        // Mic route: join as mic (room optional for new flow)
+        if (room && room.length !== 6) {
             showError('Invalid room code');
             return null;
         }
-        return { route: 'mic', room, passcode };
+        return { route: 'mic', room: room || null, passcode };
     }
     
     // Default: use existing deep-link logic
@@ -667,156 +655,8 @@ function detectRouteAndInit() {
     return null;
 }
 
-// Initialize intro screen
-function initializeIntroScreen() {
-    if (!introScreen) return;
-    
-    // Hide join screen initially
-    if (joinScreen) joinScreen.classList.remove('active');
-    
-    // Load active rooms
-    loadActiveRooms();
-    
-    // Handle "Let's Huddle" button
-    if (letsHuddleBtn) {
-        letsHuddleBtn.addEventListener('click', () => {
-            // Hide intro, show join screen with all options visible
-            if (introScreen) introScreen.classList.remove('active');
-            if (joinScreen) {
-                joinScreen.classList.add('active');
-                // Show all options: Create Room and Join Room buttons both visible
-                if (roomCodeGroup) roomCodeGroup.style.display = 'none';
-                if (createBtn) createBtn.style.display = 'block';
-                if (joinBtn) joinBtn.style.display = 'block';
-            }
-        });
-    }
-    
-    // Handle "Join Room" button on intro screen
-    if (joinRoomBtn) {
-        joinRoomBtn.addEventListener('click', () => {
-            // Hide intro, show join screen in join mode
-            if (introScreen) introScreen.classList.remove('active');
-            if (joinScreen) {
-                joinScreen.classList.add('active');
-                if (roomCodeGroup) roomCodeGroup.style.display = 'block';
-                if (createBtn) createBtn.style.display = 'none';
-                if (joinBtn) joinBtn.style.display = 'block';
-                if (roomCodeInput) roomCodeInput.focus();
-            }
-        });
-    }
-    
-    // Handle skip intro (accessibility)
-    if (skipIntro) {
-        skipIntro.addEventListener('click', (e) => {
-            e.preventDefault();
-            if (introScreen) introScreen.classList.remove('active');
-            if (joinScreen) joinScreen.classList.add('active');
-        });
-    }
-}
-
-// Load and display active rooms
-async function loadActiveRooms() {
-    if (!activeRooms || !noActiveRooms) return;
-    
-    try {
-        const response = await fetch('/api/rooms');
-        const data = await response.json();
-        
-        if (data.rooms && data.rooms.length > 0) {
-            noActiveRooms.style.display = 'none';
-            activeRooms.innerHTML = '';
-            
-            data.rooms.slice(0, 5).forEach((room, index) => { // Show max 5 rooms
-                const roomCard = document.createElement('div');
-                roomCard.className = 'active-room-card';
-                
-                const roomInfo = document.createElement('div');
-                roomInfo.className = 'active-room-info';
-                
-                const code = document.createElement('div');
-                code.className = 'active-room-code';
-                code.textContent = room.code;
-                
-                const meta = document.createElement('div');
-                meta.className = 'active-room-meta';
-                const parts = [];
-                if (room.micCount > 0) parts.push(`${room.micCount} mic${room.micCount !== 1 ? 's' : ''}`);
-                if (room.viewerCount > 0) parts.push(`${room.viewerCount} viewer${room.viewerCount !== 1 ? 's' : ''}`);
-                meta.textContent = parts.length > 0 ? parts.join(', ') : 'Empty';
-                
-                // Avatar cluster
-                const avatarCluster = document.createElement('div');
-                avatarCluster.className = 'active-room-avatar-cluster';
-                const participantCount = (room.micCount || 0) + (room.viewerCount || 0);
-                for (let i = 0; i < Math.min(participantCount, 3); i++) {
-                    const avatar = document.createElement('div');
-                    avatar.className = 'active-room-avatar';
-                    avatarCluster.appendChild(avatar);
-                }
-                meta.appendChild(avatarCluster);
-                
-                roomInfo.appendChild(code);
-                roomInfo.appendChild(meta);
-                
-                const joinBtn = document.createElement('button');
-                joinBtn.className = 'btn btn-join-room-card';
-                joinBtn.textContent = 'Join';
-                joinBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    // Navigate to join screen with room code
-                    if (introScreen) introScreen.classList.remove('active');
-                    if (joinScreen) {
-                        joinScreen.classList.add('active');
-                        if (roomCodeInput) {
-                            roomCodeInput.value = room.code;
-                            roomCodeInput.focus();
-                        }
-                        if (roomCodeGroup) roomCodeGroup.style.display = 'block';
-                        if (createBtn) createBtn.style.display = 'none';
-                        if (joinBtn) document.getElementById('joinBtn').style.display = 'block';
-                    }
-                };
-                
-                roomCard.appendChild(roomInfo);
-                roomCard.appendChild(joinBtn);
-                activeRooms.appendChild(roomCard);
-                
-                // Stagger animation
-                setTimeout(() => {
-                    roomCard.classList.add('visible');
-                }, index * 100);
-            });
-        } else {
-            noActiveRooms.style.display = 'block';
-            activeRooms.innerHTML = '';
-        }
-    } catch (error) {
-        console.error('Failed to load active rooms:', error);
-        if (noActiveRooms) noActiveRooms.style.display = 'block';
-    }
-}
-
-// Initialize intro screen if it exists
-// BUT: Skip intro if we're on a specific route (/viewer, /mic, /host)
-let routeInfo = null;
-const pathname = window.location.pathname;
-const shouldSkipIntro = pathname === '/viewer' || pathname === '/mic' || pathname === '/host';
-
-if (introScreen && !shouldSkipIntro) {
-    // Show intro only on / (root) or other non-route pages
-    initializeIntroScreen();
-} else {
-    // No intro screen OR we're on a route that should skip intro
-    if (introScreen && shouldSkipIntro) {
-        // Hide intro screen if we're on a route page
-        introScreen.classList.remove('active');
-    }
-    // Proceed with normal route detection
-    routeInfo = detectRouteAndInit();
-}
+// Entry splash is standalone and not controlled by app.js.
+const routeInfo = detectRouteAndInit();
 
 // Get or create deviceId (stable device identity)
 function getDeviceId() {
@@ -955,12 +795,16 @@ async function initializeRoute() {
         
         currentRole = 'mic';
         currentRoom = routeInfo.room;
-        if (routeInfo.passcode) setRoomPasscode(routeInfo.room, routeInfo.passcode);
-        connectAndJoin(routeInfo.room, routeInfo.passcode || getRoomPasscode(routeInfo.room));
+        if (routeInfo.room) {
+            if (routeInfo.passcode) setRoomPasscode(routeInfo.room, routeInfo.passcode);
+            connectAndJoin(routeInfo.room, routeInfo.passcode || getRoomPasscode(routeInfo.room));
+        } else {
+            showMicScreen();
+        }
     }
 }
 
-// Intro is disabled; initialize routes immediately.
+// Initialize routes immediately.
 if (routeInfo && (routeInfo.route === 'host' || routeInfo.route === 'viewer' || routeInfo.route === 'mic')) {
     initializeRoute();
 } else {
@@ -2235,8 +2079,6 @@ function showHostScreen() {
     // If this page doesn't include the host DOM, do nothing.
     if (!hostScreen) return;
 
-    // Hide intro screen if it's still active
-    if (introScreen && introScreen.classList) introScreen.classList.remove('active');
     if (joinScreen && joinScreen.classList) joinScreen.classList.remove('active');
     if (micScreen) micScreen.classList.remove('active');
     if (viewerScreen) viewerScreen.classList.remove('active');
@@ -2266,8 +2108,6 @@ function showViewerScreen() {
         return;
     }
     // On split-route pages, join/host/mic screens may not exist; only toggle what exists.
-    // Hide intro screen if it's still active
-    if (introScreen && introScreen.classList) introScreen.classList.remove('active');
     if (joinScreen && joinScreen.classList) joinScreen.classList.remove('active');
     if (hostScreen && hostScreen.classList) hostScreen.classList.remove('active');
     if (micScreen && micScreen.classList) micScreen.classList.remove('active');
@@ -2358,8 +2198,8 @@ async function showMicScreen() {
     if (viewerScreen) viewerScreen.classList.remove('active');
     micScreen.classList.add('active');
     
-    if (micRoomCode && currentRoom) {
-        micRoomCode.textContent = currentRoom;
+    if (micRoomCode) {
+        micRoomCode.textContent = currentRoom || '—';
     }
     if (micName && userName) {
         micName.textContent = userName;
@@ -2369,14 +2209,15 @@ async function showMicScreen() {
     updateMicIconState('idle');
     if (startMicBtn) startMicBtn.style.display = 'block';
     if (stopMicBtn) stopMicBtn.style.display = 'none';
-    if (micStatus) micStatus.textContent = 'Ready to start';
+    if (micStatus) micStatus.textContent = currentRoom ? 'Ready to start' : 'Create a room to start';
     if (micFeedback) micFeedback.style.display = 'none';
     if (micWarningBanner) micWarningBanner.style.display = 'none';
     
     // Initialize room status display (will update when state message arrives)
     if (micRoomStatusText) {
-        micRoomStatusText.textContent = 'Connecting to room...';
+        micRoomStatusText.textContent = currentRoom ? 'Connecting to room...' : 'Create a room to start sharing audio.';
     }
+    updateMicStartState();
     
     // Show transcript card (initially hidden, will show when recording starts)
     if (micTranscriptCard) {
@@ -2425,10 +2266,10 @@ async function showMicScreen() {
         document.head.appendChild(script);
     }
     
-    // Enable/disable start button based on consent
+    // Enable/disable start button based on consent + room availability
     consentCheckbox.addEventListener('change', () => {
         const isChecked = consentCheckbox.checked;
-        startMicBtn.disabled = !isChecked;
+        updateMicStartState(isChecked);
         if (isChecked && consentError) {
             consentError.style.display = 'none';
         }
@@ -2437,6 +2278,12 @@ async function showMicScreen() {
     // Pre-flight mic permission check
     checkMicPermissions();
     updateStatusBars();
+}
+
+function updateMicStartState(isConsentChecked = consentCheckbox?.checked) {
+    if (!startMicBtn) return;
+    const hasRoom = Boolean(currentRoom);
+    startMicBtn.disabled = !hasRoom || !isConsentChecked;
 }
 
 // Keep status bars fresh (ages, reconnect text)
@@ -4041,38 +3888,48 @@ if (leaveMicBtn) leaveMicBtn.addEventListener('click', () => {
     reset();
 });
 
-// Open Room button (opens viewer in new tab)
+// Open Room button (creates room if needed, then navigates to viewer)
 if (openRoomBtn) {
     openRoomBtn.addEventListener('click', async () => {
-        if (!currentRoom) {
-            showToast('No room to open', 'warn');
-            return;
-        }
+        openRoomBtn.disabled = true;
+        openRoomBtn.textContent = 'Opening...';
         try {
+            if (!currentRoom) {
+                const response = await fetch('/api/rooms', { method: 'POST' });
+                if (!response.ok) {
+                    throw new Error('Failed to create room');
+                }
+                const data = await response.json();
+                const roomCodeRaw = (data.room || data.code || data.roomId || data.id || '')
+                    .toString()
+                    .trim()
+                    .toUpperCase();
+
+                if (!roomCodeRaw || roomCodeRaw.length !== 6) {
+                    throw new Error('Could not create room');
+                }
+
+                currentRoom = roomCodeRaw;
+
+                try { localStorage.setItem('huddle:lastRoom', currentRoom); } catch {}
+                if (micRoomCode) micRoomCode.textContent = currentRoom;
+                updateMicStartState();
+            }
+
             const viewerUrl = await buildViewerLink(currentRoom);
             if (!viewerUrl) {
-                showToast('Failed to build room URL', 'error');
-                return;
+                throw new Error('Failed to build room URL');
             }
-            const newWindow = window.open(viewerUrl, '_blank');
-            if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
-                // Popup blocked - try alternative approach
-                showToast('Popup blocked. Please allow popups and try again, or copy the room code.', 'warn');
-                // Fallback: show the URL so user can copy it
-                try {
-                    await copyText(viewerUrl);
-                    showToast('Room URL copied to clipboard. Paste it in a new tab.', 'info');
-                } catch (copyError) {
-                    // If copy also fails, at least show the URL in console
-                    console.log('Room URL:', viewerUrl);
-                    showToast('Popup blocked. Check console for room URL.', 'warn');
-                }
-            } else {
-                showToast('Opening room as viewer in new tab', 'info');
-            }
+            window.location.assign(viewerUrl);
         } catch (error) {
             console.error('Error opening room:', error);
-            showToast(`Failed to open room: ${error.message}`, 'error');
+            showToast('Could not create room', 'error');
+            if (error?.message) {
+                showToast(error.message, 'error');
+            }
+        } finally {
+            openRoomBtn.disabled = false;
+            openRoomBtn.textContent = 'Open Room';
         }
     });
 }
@@ -5235,4 +5092,3 @@ if (highContrastToggle) {
     });
     updateHighContrast(); // Initialize on load
 }
-
